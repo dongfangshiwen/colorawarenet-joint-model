@@ -1,0 +1,22 @@
+# Keep root-level files trackable, but ignore root-level directories by default.
+/*/
+
+# The model modules are intended to be pushed.
+!/models/
+!/models/**
+
+# Python/runtime caches should not be pushed, even under models.
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Common local training/runtime artifacts.
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+
