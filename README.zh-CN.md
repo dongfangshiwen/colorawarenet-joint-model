@@ -17,17 +17,38 @@
 
 > **论文** · *A Color-Gain-Guided, Color-Preserving Joint Framework for Image Dehazing and Semantic Segmentation*
 
-**快速导航：** [开始使用](#quick-start) · [安装](#installation) · [数据集](#datasets) · [方法](#method) · [训练](#training) · [评估](#prediction-and-evaluation) · [权重](#checkpoints) · [实验](#ablations-and-visualization) · [常见问题](#faq) · [引用](#citation)
+**快速导航：** [项目介绍](#overview) · [开始使用](#quick-start) · [安装](#installation) · [数据集](#datasets) · [方法](#method) · [训练](#training) · [评估](#prediction-and-evaluation) · [权重](#checkpoints) · [实验](#ablations-and-visualization) · [常见问题](#faq) · [引用](#citation)
 
-ColorAwareUNet 通过 RGB 增益、空间残差与细化分支恢复颜色和细节；LiteAttentionUNet 使用深度可分离卷积与 attention gate，对去雾图进行语义分割。两个网络通过三阶段训练协同优化。
+<a id="overview"></a>
+
+## 项目介绍
+
+**ColorAwareNet 将图像去雾与道路分割连接为一个可联合训练的流程。** 本仓库提供页首论文的 PyTorch 实现：输入一张雾天 RGB 图像，先由 **ColorAwareUNet** 恢复图像，再由 **LiteAttentionUNet** 根据去雾结果预测道路与背景的二分类标注。
+
+论文关注的问题是：如何在改善可见度、保持颜色的同时，保留有助于语义分割的场景结构。雾会降低对比度、模糊目标边界，而去雾产生的伪影也可能改变分割网络识别道路时依赖的线索。因此，框架将图像恢复与语义分割纳入同一训练流程，并从图像质量、颜色一致性和分割准确性三个方面进行评估。
 
 [![论文图 2：联合框架的总体网络架构、训练流程与推理过程。](docs/assets/framework.png)](docs/assets/framework.png)
 
 *论文图 2：联合框架的总体架构、训练流程与推理过程。点击图片可查看原始分辨率。*
 
-| 训练 | 评估 | 分析 |
+### 核心思路
+
+- **显式的 RGB 颜色增益。** 去雾网络为每张图像预测三个增益值，分别作用于红、绿、蓝通道。同一通道的增益在整幅图像上共享，便于直接观察模型如何调整整体颜色。
+- **局部细节恢复。** 空间残差与细化分支补充全局增益，使模型能在不同区域施加不同修正，恢复道路边界、标线等局部结构。
+- **由分割目标参与优化的去雾。** 轻量注意力分割网络从去雾图中学习语义。在分别预训练后，联合微调使分割损失也能更新去雾网络，与图像恢复目标共同参与优化。
+
+推理时**只需输入雾图**。清晰参考图和道路标注用于训练监督与配对评估。
+
+### 本仓库可以完成什么
+
+| 工作流程 | 数据 / 配置 | 主要输出 |
 | :--- | :--- | :--- |
-| 道路联合训练与五种去雾对比模型 | 道路数据、SOTS 与增强 HSTS | 注册式消融、增益图与组件可视化 |
+| [训练联合模型](#training) | 对齐的道路雾图、清晰图与标注三元组 | 三阶段权重、实际数据划分与训练曲线 |
+| [开展去雾实验](#datasets) | SOTS indoor/outdoor、增强 HSTS，以及五种保留的对比模型 | 去雾图与图像质量、颜色指标 |
+| [预测与评估](#prediction-and-evaluation) | 单张图像、图像目录或配对验证集 | 去雾 RGB 图、道路标注、叠加图与指标汇总 |
+| [分析模型组件](#ablations-and-visualization) | 结构、增益、注意力和训练策略等注册式消融 | 实验汇总、增益可视化与组件图 |
+
+道路实验使用 **185 组配对样本**，划分为 **157 组训练 / 28 组验证**，无独立测试集。SOTS 和增强 HSTS 用于去雾评估，不提供语义标注。配对规则与结果报告协议见[数据集](#datasets)和[评估说明](#prediction-and-evaluation)。
 
 本仓库公开源码、使用文档与论文中的网络架构图。数据和权重需在本地准备；论文全文与 notebook 不包含在代码发布中。
 
@@ -157,6 +178,22 @@ datasets/
 <a id="method"></a>
 
 ## 方法与模型
+
+### 从雾图到道路标注
+
+**1. 恢复颜色与空间细节。** ColorAwareUNet 采用带跳跃连接的 U-Net 编码器—解码器。瓶颈特征用于预测全局 RGB 增益，解码器输出与图像同尺寸的残差；细化分支结合输入图、粗恢复图、残差和解码特征，生成最终修正。论文主配置对应：
+
+```text
+颜色增益 = max(0.95, 1 + 0.30 × tanh(原始增益预测))
+粗恢复图 = 雾图 × 颜色增益 + 0.50 × 残差
+去雾图   = clamp(粗恢复图 + 0.25 × 细化修正, 0, 1)
+```
+
+颜色增益是跨空间位置共享的三个数值；残差与细化修正则是与图像同尺寸的三通道特征图。增益由模型根据当前输入预测，不同图像可以获得不同的颜色调整。
+
+**2. 对去雾图进行分割。** 去雾 RGB 图经过 ImageNet 归一化后进入 LiteAttentionUNet。深度可分离卷积用于轻量特征提取，attention gate 利用解码器上下文筛选编码器的跳跃连接特征。主配置启用 attention，关闭 SE 与辅助头，最终分类器将每个像素判定为道路或背景。
+
+**3. 分阶段学习两个任务。** 首先预训练去雾网络，建立图像恢复映射；随后冻结去雾器，让分割网络适应去雾图；最后通过联合微调，让恢复损失与分割损失沿连接的网络共同优化。各阶段更新哪些参数，见 [60 / 20 / 20 训练安排](#training)。
 
 <details>
 <summary><strong>展开论文中的两个分支网络架构图</strong></summary>
@@ -330,6 +367,16 @@ python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best
 输出包括去雾图、类别编号 PNG、分割叠加图和拼图；纯去雾权重只输出去雾结果。预测保留原图尺寸，内部补齐至 16 的倍数；可用 `--resize H W` 降低推理开销，结果会插值回原尺寸。
 
 ### 数据集评估
+
+评估围绕论文中的三个角度展开。不同指标反映输出的不同性质，应结合图像恢复质量与分割区域重合程度一起分析。
+
+| 评估角度 | 指标 | 含义 |
+| :--- | :--- | :--- |
+| 图像恢复质量 | PSNR、SSIM ↑ | 相对于清晰参考图的像素保真度与结构相似性 |
+| 颜色保持 | ΔSat、CRerr ↓ | 饱和度与 RGB 通道相对比例的偏差 |
+| 道路分割 | mIoU、平均 Dice、F1 ↑ | 预测区域与真实标注的重合程度 |
+
+↑ 表示越大越好，↓ 表示越小越好。分割指标需要真实标注，在配对道路数据上计算。
 
 ```bash
 python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --output results/road-eval

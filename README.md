@@ -17,17 +17,36 @@
 
 > **Paper** · *A Color-Gain-Guided, Color-Preserving Joint Framework for Image Dehazing and Semantic Segmentation*
 
-**Navigate:** [Quick start](#quick-start) · [Installation](#installation) · [Data](#datasets) · [Method](#method) · [Training](#training) · [Evaluation](#prediction-and-evaluation) · [Checkpoints](#checkpoints) · [Experiments](#ablations-and-visualization) · [FAQ](#faq) · [Citation](#citation)
+**Navigate:** [Overview](#overview) · [Quick start](#quick-start) · [Installation](#installation) · [Data](#datasets) · [Method](#method) · [Training](#training) · [Evaluation](#prediction-and-evaluation) · [Checkpoints](#checkpoints) · [Experiments](#ablations-and-visualization) · [FAQ](#faq) · [Citation](#citation)
 
-ColorAwareUNet restores color and detail through RGB gain, spatial residual prediction and refinement. LiteAttentionUNet segments the restored image using depthwise-separable convolutions and attention gates. The two networks are trained in three stages.
+## Overview
+
+**ColorAwareNet couples image dehazing with road segmentation in a single trainable pipeline.** This repository provides the PyTorch implementation of the paper above. Given a hazy RGB image, **ColorAwareUNet** produces a restored image, and **LiteAttentionUNet** predicts a road/background mask from that result.
+
+The paper asks how restoration can improve visibility and preserve color while retaining structures useful for semantic segmentation. Haze reduces contrast and weakens object boundaries; restoration artifacts can also change the visual cues used to recognize a road. The framework brings restoration and segmentation objectives into the same training process, with image quality, color consistency and semantic accuracy evaluated together.
 
 [![Figure 2 from the paper: overall architecture, training workflow and inference process of the proposed joint framework.](docs/assets/framework.png)](docs/assets/framework.png)
 
 *Figure 2 from the manuscript: overall architecture, training workflow and inference process. Click the image to view the original resolution.*
 
-| Train | Evaluate | Explore |
+### Key ideas
+
+- **An explicit RGB color gain.** The dehazer predicts three gain values per image, one for each color channel. Each value is applied across the image, providing a compact correction whose effect on color can be inspected directly.
+- **Local detail reconstruction.** A spatial residual and a refinement head complement the global gain, allowing corrections to vary across regions and recover structures such as road boundaries and markings.
+- **Segmentation-aware restoration.** A lightweight attention segmenter learns from the restored images. After separate pretraining stages, joint fine-tuning lets the segmentation loss also update the dehazer, alongside its image-restoration objective.
+
+At inference, **only a hazy image is required**. Clear reference images and road masks provide supervision during training and are used for paired evaluation.
+
+### What you can do with this repository
+
+| Workflow | Data / configuration | Main outputs |
 | :--- | :--- | :--- |
-| Joint road training and five dehazing baselines | Paired roads, SOTS and augmented HSTS | Registered ablations, gain maps and component figures |
+| [Train the joint model](#training) | Aligned road hazy/clear/mask triplets | Three-stage checkpoints, saved data split and training curves |
+| [Run dehazing experiments](#datasets) | SOTS indoor/outdoor and augmented HSTS; five retained baselines | Restored images and image-quality/color metrics |
+| [Predict and evaluate](#prediction-and-evaluation) | A single image, a folder or a paired validation set | Restored RGB, road masks, overlays and metric summaries |
+| [Study the components](#ablations-and-visualization) | Registered architecture, gain, attention and training ablations | Experiment summaries, gain visualizations and component figures |
+
+The road experiment uses **185 paired samples**, split into **157 training / 28 validation** samples, with no independent test set. SOTS and augmented HSTS provide dehazing evaluation without semantic labels. See [datasets](#datasets) and [evaluation](#prediction-and-evaluation) for the pairing rules and reporting protocols.
 
 This release contains source code, documentation and the manuscript's network architecture figures. Prepare datasets and checkpoints locally; the full manuscript and notebooks are excluded.
 
@@ -150,6 +169,22 @@ Other datasets must be prepared separately:
 These benchmarks use restoration-only supervision. No dummy segmentation masks are generated. HSTS keeps paired crop, flip and rotation augmentation; `--train-repeats` controls repeated training samples. Results on augmented HSTS-derived data are not results under the unmodified official HSTS protocol. Unpaired real images can be processed with `predict --input`, without full-reference evaluation.
 
 ## Method
+
+### From a hazy image to a road mask
+
+**1. Restore color and spatial detail.** ColorAwareUNet uses a U-Net encoder–decoder with skip connections. Features from its bottleneck predict the global RGB gain, while the decoder predicts a residual at image resolution. A refinement head then combines the input, coarse restoration, residual and decoder features to produce a final correction. With the main configuration:
+
+```text
+gain     = max(0.95, 1 + 0.30 × tanh(raw_gain))
+coarse   = hazy × gain + 0.50 × residual
+restored = clamp(coarse + 0.25 × refinement, 0, 1)
+```
+
+Here, `gain` contains three values shared across spatial positions; `residual` and `refinement` are three-channel maps at image resolution. The gain head learns from each input, so its values can differ between images.
+
+**2. Segment the restored image.** ImageNet normalization prepares the restored RGB image for LiteAttentionUNet. Depthwise-separable convolutions provide lightweight feature extraction, and attention gates use decoder context to filter encoder skip features. The main configuration enables attention and disables SE and the auxiliary head. The final classifier assigns each pixel to road or background.
+
+**3. Learn the two tasks progressively.** Dehazing pretraining establishes the restoration mapping. The dehazer is then frozen while the segmenter learns from its outputs. In joint fine-tuning, restoration and segmentation losses update both networks through the connected pipeline. The [60 / 20 / 20 schedule](#training) specifies which parameters are updated at each stage.
 
 <details>
 <summary><strong>Network architecture figures from the manuscript</strong></summary>
@@ -320,6 +355,16 @@ python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best
 Joint prediction saves restored images, class-index PNG masks, overlays and comparison strips. Restoration-only weights do not produce segmentation. Images are internally padded to a multiple of 16; outputs retain the original resolution. Optional `--resize H W` reduces inference cost, with outputs resized back afterwards.
 
 ### Evaluation
+
+The evaluation follows the paper's three perspectives. These measurements describe different aspects of the output, so restoration scores and segmentation overlap should be considered together.
+
+| Perspective | Metrics | Interpretation |
+| :--- | :--- | :--- |
+| Restoration quality | PSNR, SSIM ↑ | Pixel fidelity and structural similarity to the clear reference |
+| Color preservation | ΔSat, CRerr ↓ | Differences in saturation and relative RGB channel proportions |
+| Road segmentation | mIoU, mean Dice, F1 ↑ | Agreement between predicted regions and the annotated mask |
+
+↑ Higher is better; ↓ lower is better. Segmentation metrics require ground-truth masks and are available for the paired road dataset.
 
 ```bash
 python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --output results/road-eval
