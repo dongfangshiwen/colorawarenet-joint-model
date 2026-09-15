@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "color-gain-dehaze-seg"
+version = "0.1.0"
+description = "Color-gain-guided image dehazing and semantic segmentation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.3,<3",
+  "torchvision>=0.18,<1",
+  "numpy>=1.24,<3",
+  "Pillow>=10,<12",
+  "tqdm>=4.66,<5",
+  "matplotlib>=3.8,<4",
+]
+
+[project.optional-dependencies]
+tools = ["opencv-python>=4.8,<5", "PySide6>=6.6,<7"]
+
+[project.scripts]
+dehaze-seg = "dehaze_seg.cli:entrypoint"
+
+[tool.setuptools.packages.find]
+include = ["dehaze_seg*"]

@@ -1,22 +1,50 @@
-# Keep root-level files trackable, but ignore root-level directories by default.
-/*/
-
-# The model modules are intended to be pushed.
-!/models/
-!/models/**
-
-# Python/runtime caches should not be pushed, even under models.
+# Python and build output
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Common local training/runtime artifacts.
-.ipynb_checkpoints/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-# OS/editor noise.
+# Local data, checkpoints and experiment products
+/datasets/
+/SOTS/
+/HSTS/
+/NH-HAZE/
+/weights/
+/runs/
+/results/
+/compare/
+/ckpt*/
+/color_gain_visualizations*/
+/coloraware_component_visualizations*/
+/paper_figures*/
+*.pth
+*.pt
+*.ckpt
+*.zip
+*.csv
+*.npy
+
+# Paper materials and notebooks are not part of the code release
+/papers/
+/pdfs/
+*.pdf
+*.docx
+*.pptx
+*.ipynb
+.ipynb_checkpoints/
+
+# Local agent/editor/OS files
+/.agents/
+/.codewhale/
+/.codex/
+.env
 .DS_Store
 Thumbs.db
-
