@@ -7,7 +7,8 @@
 [English](README.md) · **简体中文**
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.8.0_CPU_checked-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](#validation)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.3.0_GPU-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](#installation)
+[![CUDA](https://img.shields.io/badge/CUDA-12.1-76B900?style=flat-square&logo=nvidia&logoColor=white)](#installation)
 [![Training](https://img.shields.io/badge/Entry-train.py-0F766E?style=flat-square)](train.py)
 
 [训练入口](train.py) · [数据下载](https://pan.baidu.com/s/18BtKG8-QHzRhfCGqjiuoUA?pwd=8888) · [GitHub Issues](https://github.com/dongfangshiwen/colorawarenet-joint-model/issues)
@@ -20,13 +21,15 @@
 
 ColorAwareUNet 通过 RGB 增益、空间残差与细化分支恢复颜色和细节；LiteAttentionUNet 使用深度可分离卷积与 attention gate，对去雾图进行语义分割。两个网络通过三阶段训练协同优化。
 
-![方法概览：雾图输入经过 ColorAwareUNet 得到去雾图，经 ImageNet 归一化后送入 LiteAttentionUNet，输出分割标注。](docs/assets/framework.zh-CN.svg)
+[![论文图 2：联合框架的总体网络架构、训练流程与推理过程。](docs/assets/framework.png)](docs/assets/framework.png)
+
+*论文图 2：联合框架的总体架构、训练流程与推理过程。点击图片可查看原始分辨率。*
 
 | 训练 | 评估 | 分析 |
 | :--- | :--- | :--- |
-| 道路联合训练与五种去雾对比模型 | 道路数据、SOTS、HSTS、NH-HAZE | 注册式消融、增益图与组件可视化 |
+| 道路联合训练与五种去雾对比模型 | 道路数据、SOTS 与增强 HSTS | 注册式消融、增益图与组件可视化 |
 
-本仓库公开源码与使用文档。数据和权重需在本地准备；论文附件与 notebook 不包含在代码发布中。
+本仓库公开源码、使用文档与论文中的网络架构图。数据和权重需在本地准备；论文全文与 notebook 不包含在代码发布中。
 
 ---
 
@@ -41,7 +44,7 @@ ColorAwareUNet 通过 RGB 增益、空间残差与细化分支恢复颜色和细
 3. 启动论文默认的 60 / 20 / 20 三阶段训练：
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model coloraware --output runs/paper --amp
+python train.py --dataset paired-road --data-root datasets --model coloraware --output runs/paper --device cuda --amp
 ```
 
 训练完成后，用生成的权重预测一张图像：
@@ -50,7 +53,7 @@ python train.py --dataset paired-road --data-root datasets --model coloraware --
 python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best.pth --input datasets/hazy/001.png --output results/single
 ```
 
-将 `001.png` 替换为实际图像文件名。默认自动选择设备，`--amp` 仅在 CUDA 上生效。较小规模的 CPU 流程检查见[训练说明](#training)；默认感知损失需要预训练 VGG16 权重，离线缓存方式见[常见问题](#faq)。
+将 `001.png` 替换为实际图像文件名。训练示例通过 `--device cuda --amp` 明确使用 CUDA GPU 和混合精度；预测默认自动选择可用 GPU。较小规模的 CPU 流程检查见[训练说明](#training)；默认感知损失需要预训练 VGG16 权重，离线缓存方式见[常见问题](#faq)。
 
 <a id="installation"></a>
 
@@ -63,7 +66,7 @@ git clone https://github.com/dongfangshiwen/colorawarenet-joint-model.git
 cd colorawarenet-joint-model
 ```
 
-需要 Python 3.10 或更高版本。建议在独立虚拟环境中安装彼此兼容的 PyTorch、torchvision，再安装本项目。
+建议使用与论文一致的 **Python 3.12**（项目最低要求为 Python 3.10），并创建独立虚拟环境。
 
 ```bash
 python -m venv .venv
@@ -71,25 +74,50 @@ python -m venv .venv
 
 激活环境：Windows PowerShell 使用 `.venv\Scripts\Activate.ps1`；Linux 使用 `source .venv/bin/activate`。
 
-已验证的 CPU 环境安装命令：
+### GPU 环境安装
+
+论文第 4.1.3 节记录的环境为 **PyTorch 2.3.0、CUDA 12.1**。在具备 NVIDIA GPU 和兼容驱动的机器上，按 [PyTorch 官方版本表](https://pytorch.org/get-started/previous-versions/#v230)安装 CUDA 版 PyTorch 及对应的 torchvision：
+
+```bash
+python -m pip install torch==2.3.0 torchvision==0.18.0 --index-url https://download.pytorch.org/whl/cu121
+python -m pip install -e . "numpy<2"
+python -m dehaze_seg --help
+```
+
+这里将 NumPy 限制在 1.x，以避免旧版 PyTorch 环境中的二进制兼容问题；这是安装兼容约束，不是论文中记录的 NumPy 版本。说明见 [NumPy 官方兼容性指南](https://numpy.org/doc/stable/user/troubleshooting-importerror.html#downstream-importerror-attributeerror-or-c-api-abi-incompatibility)。
+
+训练前检查 GPU 是否可用：
+
+```bash
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available()); assert torch.cuda.is_available(), 'CUDA GPU unavailable'; print('GPU:', torch.cuda.get_device_name(0))"
+```
+
+`--device cuda` 明确要求使用可见的 CUDA GPU，`--amp` 启用 GPU 混合精度。CLI 默认的 `--device auto` 在 CUDA 可用时自动选择 GPU。安装后也可使用 `dehaze-seg` 命令。
+
+<details>
+<summary><strong>用于本地流程检查的 CPU 安装方式</strong></summary>
+
+在另一个独立虚拟环境中，可安装本机已验证的 CPU 组合：
 
 ```bash
 python -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -e .
-python -m dehaze_seg --help
 ```
 
-使用 GPU 时，先安装适合本机驱动的 CUDA 版 PyTorch/torchvision，再执行 `python -m pip install -e .`。`--device auto` 自动选择 CUDA 或 CPU，`--device cuda` 明确要求 CUDA；`--amp` 仅在 CUDA 上启用混合精度。安装后也可使用 `dehaze-seg` 命令。
+运行[训练说明](#training)中的缩小规模示例，使用 `--device cpu`。这是本地验证环境，论文实验使用 GPU。
+
+</details>
 
 <details>
 <summary><strong>论文环境与本机验证环境</strong></summary>
 
 | 环境 | 说明 |
 |---|---|
-| 论文记录 | Ubuntu 22.04、Python 3.12、PyTorch 2.3.0、CUDA 12.1、32 GB vGPU |
+| 论文软件环境 | Ubuntu 22.04、Python 3.12、PyTorch 2.3.0、CUDA 12.1 |
+| 论文云端硬件 | 1 张 32 GB vGPU、16 个 Intel Xeon Platinum 8352V vCPU、62 GB RAM |
 | CPU 回归验证 | Windows、Python 3.12、PyTorch 2.8.0+cpu、torchvision 0.23.0 |
 
-CPU 回归检查不代表完整论文结果复现；CUDA 训练需在相应硬件环境中另行验证。依赖范围用于安装解析，不表示所有版本组合均经过测试。
+上述 GPU 配置来自论文记录。本次仓库整理的检查使用本机 CPU 环境，未重新验证 CUDA 运行和完整论文训练。依赖范围用于安装解析，不表示所有版本组合均经过测试。
 
 </details>
 
@@ -123,13 +151,27 @@ datasets/
 |---|---|
 | `sots-indoor` / `sots-outdoor` | `hazy/` 和 `clear/` 或 `gt/`；先匹配完整主名，再将 `1400_1` 匹配到 `1400` |
 | `hsts` | `synthetic/synthetic/` 为雾图，`synthetic/original/` 为同名清晰图 |
-| `nh-haze` | `hazy/01_hazy.png` 与 `clear/01_GT.png`，也支持同名配对 |
 
 这些入口默认只训练去雾，不生成分割标签。HSTS 保留同步裁剪、翻转和旋转增强，`--train-repeats` 控制每轮重复次数；增强 HSTS 衍生数据实验不能作为未修改官方 HSTS 协议的结果。HSTS 的无参考真实图像可直接通过 `predict --input` 推理，不计算全参考指标。
 
 <a id="method"></a>
 
 ## 方法与模型
+
+<details>
+<summary><strong>展开论文中的两个分支网络架构图</strong></summary>
+
+**图 3 · ColorAwareUNet：** 全局 RGB 增益、残差预测与细化模块。
+
+[![论文图 3：ColorAwareUNet 网络架构。](docs/assets/colorawareunet.png)](docs/assets/colorawareunet.png)
+
+**图 4 · LiteAttentionUNet：** 轻量卷积、attention gate 与可选 SE 模块。
+
+[![论文图 4：LiteAttentionUNet 网络架构。](docs/assets/liteattentionunet.png)](docs/assets/liteattentionunet.png)
+
+以上图片直接取自提供的 Word 论文，点击可查看原始分辨率。可选模块的默认开关见下方配置表。
+
+</details>
 
 ### 支持的模型
 
@@ -142,7 +184,7 @@ datasets/
 | `grid` | 仓库中的 GridDehazeNet 实现 |
 | `psd` | 仓库中的 PSDDehazeNet 实现 |
 
-对比模型保留本仓库已有实现与参数，不宣称与原作者官方代码、权重或结果完全一致。
+论文第 4.1.5 节的下游比较要求各去雾方法**共用同一个冻结的 LiteAttentionUNet 权重**，不针对各方法单独微调分割器。对比模型保留本仓库已有实现与参数，不宣称与原作者官方代码、权重或结果完全一致。
 
 ### 论文主配置
 
@@ -198,14 +240,14 @@ MSE、梯度差、ΔSat 和 CRerr 不参与默认优化；侧输出只用于兼�
 ### 道路数据联合训练
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model coloraware --output runs/paper --amp
+python train.py --dataset paired-road --data-root datasets --model coloraware --output runs/paper --device cuda --amp
 ```
 
 <details>
 <summary><strong>展开论文主配置的完整命令</strong></summary>
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model coloraware --pretrain-dehaze-epochs 60 --pretrain-seg-epochs 20 --finetune-epochs 20 --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/paper-explicit --amp
+python train.py --dataset paired-road --data-root datasets --model coloraware --pretrain-dehaze-epochs 60 --pretrain-seg-epochs 20 --finetune-epochs 20 --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/paper-explicit --device cuda --amp
 ```
 
 </details>
@@ -223,23 +265,24 @@ python train.py --data-root datasets --device cpu --resize 64 64 --batch-size 2 
 
 ### 对比模型
 
-通过 `--model` 选择保留的去雾对比模型：
+通过 `--model` 选择保留的去雾对比模型，开展可选的联合训练实验：
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model c2pnet --output runs/comparison --amp
+python train.py --dataset paired-road --data-root datasets --model c2pnet --output runs/comparison --device cuda --amp
 ```
+
+该命令会为本次训练单独训练分割器。论文第 4.1.5 节的下游比较需要将所有去雾器接入同一个冻结分割器进行评估；独立联合训练的结果应作为单独实验报告。
 
 <details>
-<summary><strong>展开 SOTS、HSTS 与 NH-HAZE 命令</strong></summary>
+<summary><strong>展开 SOTS 与增强 HSTS 命令</strong></summary>
 
 ```bash
-python train.py --dataset sots-indoor --data-root SOTS/indoor --model coloraware --pretrain-dehaze-epochs 80 --batch-size 4 --lr 5e-4 --output runs/sots --amp
-python train.py --dataset sots-outdoor --data-root SOTS/outdoor --model coloraware --pretrain-dehaze-epochs 80 --batch-size 4 --lr 5e-4 --output runs/sots --amp
-python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/hsts --amp
-python train.py --dataset nh-haze --data-root NH-HAZE --output runs/nh-haze --amp
+python train.py --dataset sots-indoor --data-root SOTS/indoor --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
+python train.py --dataset sots-outdoor --data-root SOTS/outdoor --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
+python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/hsts --device cuda --amp
 ```
 
-基准数据集只执行 `--pretrain-dehaze-epochs`，使用去雾监督。SOTS 示例显式设为 80 轮、batch size 4、lr=5e-4；通用新实验的默认学习率仍为 1e-4。
+基准数据集只执行 `--pretrain-dehaze-epochs`，使用去雾监督。示例采用论文记载的 512×512 输入和 1e-4 学习率，batch size 2 与去雾 60 轮沿用仓库默认配置。HSTS 使用配对增强，`--train-repeats 4` 为可调整的重复次数示例。
 
 </details>
 
@@ -307,6 +350,8 @@ python -m dehaze_seg evaluate --checkpoint runs/sots/sots-indoor/coloraware/best
 python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best.pth runs/comparison/paired-road/c2pnet/best.pth --input datasets/hazy --limit 5 --output results/comparison
 ```
 
+此命令使用各联合权重自身保存的分割器，不会自动替换为论文下游比较协议要求的共用冻结分割器。
+
 <a id="checkpoints"></a>
 
 ## 权重加载
@@ -339,9 +384,9 @@ python -m dehaze_seg ablate --list
 <summary><strong>展开结构、增益与注意力消融命令</strong></summary>
 
 ```bash
-python -m dehaze_seg ablate --data-root datasets --experiments arch_baseline_unet,arch_no_color_gain,arch_no_refine,arch_full --output runs/ablation --amp
-python -m dehaze_seg ablate --data-root datasets --experiments gain_local,gain_amp,gain_no_min --output runs/gain-ablation --amp
-python -m dehaze_seg ablate --data-root datasets --experiments attention_none,attention_gate,attention_se,attention_both --output runs/attention-ablation --amp
+python -m dehaze_seg ablate --data-root datasets --experiments arch_baseline_unet,arch_no_color_gain,arch_no_refine,arch_full --output runs/ablation --device cuda --amp
+python -m dehaze_seg ablate --data-root datasets --experiments gain_local,gain_amp,gain_no_min --output runs/gain-ablation --device cuda --amp
+python -m dehaze_seg ablate --data-root datasets --experiments attention_none,attention_gate,attention_se,attention_both --output runs/attention-ablation --device cuda --amp
 ```
 
 </details>

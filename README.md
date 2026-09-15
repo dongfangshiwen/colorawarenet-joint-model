@@ -7,7 +7,8 @@
 **English** · [简体中文](README.zh-CN.md)
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.8.0_CPU_checked-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](#validation)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.3.0_GPU-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](#installation)
+[![CUDA](https://img.shields.io/badge/CUDA-12.1-76B900?style=flat-square&logo=nvidia&logoColor=white)](#installation)
 [![Training](https://img.shields.io/badge/Entry-train.py-0F766E?style=flat-square)](train.py)
 
 [Training entrypoint](train.py) · [Dataset](https://pan.baidu.com/s/18BtKG8-QHzRhfCGqjiuoUA?pwd=8888) · [GitHub Issues](https://github.com/dongfangshiwen/colorawarenet-joint-model/issues)
@@ -20,13 +21,15 @@
 
 ColorAwareUNet restores color and detail through RGB gain, spatial residual prediction and refinement. LiteAttentionUNet segments the restored image using depthwise-separable convolutions and attention gates. The two networks are trained in three stages.
 
-![Framework overview: hazy RGB input, ColorAwareUNet, restored RGB, ImageNet normalization, LiteAttentionUNet and segmentation mask.](docs/assets/framework.svg)
+[![Figure 2 from the paper: overall architecture, training workflow and inference process of the proposed joint framework.](docs/assets/framework.png)](docs/assets/framework.png)
+
+*Figure 2 from the manuscript: overall architecture, training workflow and inference process. Click the image to view the original resolution.*
 
 | Train | Evaluate | Explore |
 | :--- | :--- | :--- |
-| Joint road training and five dehazing baselines | Paired roads, SOTS, HSTS and NH-HAZE | Registered ablations, gain maps and component figures |
+| Joint road training and five dehazing baselines | Paired roads, SOTS and augmented HSTS | Registered ablations, gain maps and component figures |
 
-This release contains source code and documentation. Prepare datasets and checkpoints locally; paper attachments and notebooks are excluded.
+This release contains source code, documentation and the manuscript's network architecture figures. Prepare datasets and checkpoints locally; the full manuscript and notebooks are excluded.
 
 ---
 
@@ -39,7 +42,7 @@ This release contains source code and documentation. Prepare datasets and checkp
 3. Start the paper's default 60 / 20 / 20 training schedule:
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model coloraware --output runs/paper --amp
+python train.py --dataset paired-road --data-root datasets --model coloraware --output runs/paper --device cuda --amp
 ```
 
 After training, predict an image using the generated checkpoint:
@@ -48,7 +51,7 @@ After training, predict an image using the generated checkpoint:
 python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best.pth --input datasets/hazy/001.png --output results/single
 ```
 
-Replace `001.png` with your image filename. Device selection defaults to `auto`; `--amp` applies only on CUDA. For a smaller CPU workflow check, see [training](#training). The default perceptual loss needs pretrained VGG16 weights; see [FAQ](#faq) for offline caching.
+Replace `001.png` with your image filename. The training examples explicitly select a CUDA GPU with `--device cuda --amp`; prediction selects an available GPU automatically. For a smaller CPU workflow check, see [training](#training). The default perceptual loss needs pretrained VGG16 weights; see [FAQ](#faq) for offline caching.
 
 ## Installation
 
@@ -59,31 +62,58 @@ git clone https://github.com/dongfangshiwen/colorawarenet-joint-model.git
 cd colorawarenet-joint-model
 ```
 
-Use Python 3.10+ and create a virtual environment:
+Use Python **3.12** to match the paper environment (the package requires Python 3.10+), and create a virtual environment:
 
 ```bash
 python -m venv .venv
 ```
 
-Activate it with `.venv\Scripts\Activate.ps1` on Windows PowerShell or `source .venv/bin/activate` on Linux **before installing dependencies**. The verified CPU package combination is:
+Activate it with `.venv\Scripts\Activate.ps1` on Windows PowerShell or `source .venv/bin/activate` on Linux **before installing dependencies**.
+
+### GPU installation
+
+Section 4.1.3 of the manuscript reports **PyTorch 2.3.0 and CUDA 12.1**. For an NVIDIA GPU with a compatible driver, install the CUDA build with its matching torchvision version from the [official PyTorch version table](https://pytorch.org/get-started/previous-versions/#v230):
+
+```bash
+python -m pip install torch==2.3.0 torchvision==0.18.0 --index-url https://download.pytorch.org/whl/cu121
+python -m pip install -e . "numpy<2"
+python -m dehaze_seg --help
+```
+
+The NumPy constraint keeps this older PyTorch environment on NumPy 1.x to avoid binary compatibility problems; it is an installation constraint, not a NumPy version reported in the manuscript. See [NumPy's compatibility guidance](https://numpy.org/doc/stable/user/troubleshooting-importerror.html#downstream-importerror-attributeerror-or-c-api-abi-incompatibility).
+
+Check GPU visibility before starting training:
+
+```bash
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available()); assert torch.cuda.is_available(), 'CUDA GPU unavailable'; print('GPU:', torch.cuda.get_device_name(0))"
+```
+
+`--device cuda` requires a visible CUDA GPU; `--amp` enables GPU mixed precision. The CLI default `--device auto` selects CUDA when available. Installation also provides the `dehaze-seg` executable.
+
+<details>
+<summary><strong>CPU installation for local workflow checks</strong></summary>
+
+Use a separate virtual environment for the locally verified CPU combination:
 
 ```bash
 python -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -e .
-python -m dehaze_seg --help
 ```
 
-For GPU execution, install a compatible CUDA build of PyTorch and torchvision before installing this project. `--device auto` selects CUDA when available; `--device cuda` requires it. `--amp` enables mixed precision on CUDA only. Installation also provides the `dehaze-seg` executable.
+Run the smaller example under [training](#training) with `--device cpu`. This is the local validation environment; the paper experiments used a GPU.
+
+</details>
 
 <details>
 <summary><strong>Paper environment and local validation</strong></summary>
 
 | Environment | Configuration |
 | :--- | :--- |
-| Reported in the paper | Ubuntu 22.04 · Python 3.12 · PyTorch 2.3.0 · CUDA 12.1 · 32 GB vGPU |
+| Paper software environment | Ubuntu 22.04 · Python 3.12 · PyTorch 2.3.0 · CUDA 12.1 |
+| Paper cloud hardware | One 32 GB vGPU · 16 Intel Xeon Platinum 8352V vCPUs · 62 GB RAM |
 | Local CPU regression checks | Windows · Python 3.12 · PyTorch 2.8.0+cpu · torchvision 0.23.0 |
 
-CUDA training and complete experimental reproduction were not performed. Dependency ranges describe installation constraints; they do not mean every version combination was tested.
+The GPU configuration above is taken from the manuscript. The checks performed during this repository cleanup used the local CPU environment; CUDA execution and complete experimental reproduction were not revalidated here. Dependency ranges do not mean every version combination was tested.
 
 </details>
 
@@ -116,11 +146,25 @@ Other datasets must be prepared separately:
 |---|---|
 | `sots-indoor`, `sots-outdoor` | `hazy/` and `clear/` or `gt/`; exact stem first, then scene prefix (`1400_1` → `1400`) |
 | `hsts` | `synthetic/synthetic/` for haze, `synthetic/original/` for matching clear images |
-| `nh-haze` | `hazy/01_hazy.png` and `clear/01_GT.png`; same-stem pairs are also supported |
 
 These benchmarks use restoration-only supervision. No dummy segmentation masks are generated. HSTS keeps paired crop, flip and rotation augmentation; `--train-repeats` controls repeated training samples. Results on augmented HSTS-derived data are not results under the unmodified official HSTS protocol. Unpaired real images can be processed with `predict --input`, without full-reference evaluation.
 
 ## Method
+
+<details>
+<summary><strong>Network architecture figures from the manuscript</strong></summary>
+
+**Figure 3 · ColorAwareUNet.** Global RGB gain, residual prediction and refinement modules.
+
+[![Figure 3 from the paper: ColorAwareUNet architecture.](docs/assets/colorawareunet.png)](docs/assets/colorawareunet.png)
+
+**Figure 4 · LiteAttentionUNet.** Lightweight convolutions, attention gates and optional SE blocks.
+
+[![Figure 4 from the paper: LiteAttentionUNet architecture.](docs/assets/liteattentionunet.png)](docs/assets/liteattentionunet.png)
+
+These are the original figures embedded in the supplied manuscript. Click either image to view it at full resolution. The default settings for the optional modules are listed below.
+
+</details>
 
 ### Supported models
 
@@ -133,7 +177,7 @@ These benchmarks use restoration-only supervision. No dummy segmentation masks a
 | `grid` | GridDehazeNet implementation in this repository |
 | `psd` | PSDDehazeNet implementation in this repository |
 
-All road experiments use **LiteAttentionUNet** for segmentation. The baselines retain this repository's existing implementations and parameters; equivalence to the original authors' code, weights or scores is not claimed. The DCP configuration includes learned refinement and should not be reported as pure classical DCP.
+All road experiments use **LiteAttentionUNet** for segmentation. Section 4.1.5 of the manuscript evaluates different dehazers using **one shared, frozen LiteAttentionUNet checkpoint**, without method-specific segmentation fine-tuning. The baselines retain this repository's existing implementations and parameters; equivalence to the original authors' code, weights or scores is not claimed. The DCP configuration includes learned refinement and should not be reported as pure classical DCP.
 
 ### Paper configuration
 
@@ -186,14 +230,14 @@ MSE, gradient discrepancy, saturation deviation (ΔSat) and chromaticity ratio e
 ### Joint road training
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model coloraware --output runs/paper --amp
+python train.py --dataset paired-road --data-root datasets --model coloraware --output runs/paper --device cuda --amp
 ```
 
 <details>
 <summary><strong>Explicit paper parameters</strong></summary>
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model coloraware --pretrain-dehaze-epochs 60 --pretrain-seg-epochs 20 --finetune-epochs 20 --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/paper-explicit --amp
+python train.py --dataset paired-road --data-root datasets --model coloraware --pretrain-dehaze-epochs 60 --pretrain-seg-epochs 20 --finetune-epochs 20 --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/paper-explicit --device cuda --amp
 ```
 
 </details>
@@ -211,23 +255,24 @@ python train.py --data-root datasets --device cpu --resize 64 64 --batch-size 2 
 
 ### Baselines
 
-Change `--model` to select a retained dehazing baseline:
+Change `--model` to select a retained dehazing baseline for an optional joint-training experiment:
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model c2pnet --output runs/comparison --amp
+python train.py --dataset paired-road --data-root datasets --model c2pnet --output runs/comparison --device cuda --amp
 ```
+
+This command trains a separate segmenter for the run. For the manuscript's downstream comparison, every dehazer must instead be evaluated with the same frozen segmenter described in Section 4.1.5; the independent joint-training results are a separate experiment.
 
 <details>
-<summary><strong>SOTS, HSTS and NH-HAZE commands</strong></summary>
+<summary><strong>SOTS and augmented HSTS commands</strong></summary>
 
 ```bash
-python train.py --dataset sots-indoor --data-root SOTS/indoor --model coloraware --pretrain-dehaze-epochs 80 --batch-size 4 --lr 5e-4 --output runs/sots --amp
-python train.py --dataset sots-outdoor --data-root SOTS/outdoor --model coloraware --pretrain-dehaze-epochs 80 --batch-size 4 --lr 5e-4 --output runs/sots --amp
-python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/hsts --amp
-python train.py --dataset nh-haze --data-root NH-HAZE --output runs/nh-haze --amp
+python train.py --dataset sots-indoor --data-root SOTS/indoor --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
+python train.py --dataset sots-outdoor --data-root SOTS/outdoor --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
+python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/hsts --device cuda --amp
 ```
 
-Benchmark training runs only `--pretrain-dehaze-epochs`, with restoration supervision. The SOTS examples explicitly use 80 epochs, batch size 4 and lr=5e-4; the shared default learning rate remains 1e-4.
+Benchmark training runs only `--pretrain-dehaze-epochs`, with restoration supervision. The examples use the paper's 512×512 input size and 1e-4 learning rate, with the repository's default batch size 2 and 60 restoration epochs. HSTS uses paired augmentation; `--train-repeats 4` is an example repeat setting and is configurable.
 
 </details>
 
@@ -295,7 +340,7 @@ Compare multiple checkpoints in one run:
 python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best.pth runs/comparison/paired-road/c2pnet/best.pth --input datasets/hazy --limit 5 --output results/comparison
 ```
 
-This writes separate model outputs, a summary comparison table and image grids.
+This writes separate model outputs, a summary comparison table and image grids. Each joint checkpoint uses its own saved segmenter; this command does not replace them with the shared frozen segmenter required by the paper's downstream comparison protocol.
 
 ## Checkpoints
 
@@ -320,9 +365,9 @@ python -m dehaze_seg ablate --list
 <summary><strong>Run architecture, gain and attention ablations</strong></summary>
 
 ```bash
-python -m dehaze_seg ablate --data-root datasets --experiments arch_baseline_unet,arch_no_color_gain,arch_no_refine,arch_full --output runs/ablation --amp
-python -m dehaze_seg ablate --data-root datasets --experiments gain_local,gain_amp,gain_no_min --output runs/gain-ablation --amp
-python -m dehaze_seg ablate --data-root datasets --experiments attention_none,attention_gate,attention_se,attention_both --output runs/attention-ablation --amp
+python -m dehaze_seg ablate --data-root datasets --experiments arch_baseline_unet,arch_no_color_gain,arch_no_refine,arch_full --output runs/ablation --device cuda --amp
+python -m dehaze_seg ablate --data-root datasets --experiments gain_local,gain_amp,gain_no_min --output runs/gain-ablation --device cuda --amp
+python -m dehaze_seg ablate --data-root datasets --experiments attention_none,attention_gate,attention_se,attention_both --output runs/attention-ablation --device cuda --amp
 ```
 
 </details>

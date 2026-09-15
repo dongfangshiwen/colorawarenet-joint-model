@@ -5,11 +5,11 @@ from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
 
-from .benchmarks import HSTSDataset, NHHAZEDataset
+from .benchmarks import HSTSDataset
 from .common import IMG_EXTS, find_by_stem, pil_to_rgb_tensor
 from .road import DehazeSegFolderDataset
 
-DATASETS = ("paired-road", "sots-indoor", "sots-outdoor", "hsts", "nh-haze")
+DATASETS = ("paired-road", "sots-indoor", "sots-outdoor", "hsts")
 
 
 class SOTSDataset(Dataset):
@@ -73,8 +73,6 @@ def make_dataset(name, root, ids=None, resize=(512, 512), augment=False, num_cla
         inner = SOTSDataset(**kwargs)
     elif name == "hsts":
         inner = HSTSDataset(train_repeats=train_repeats, **kwargs)
-    else:
-        inner = NHHAZEDataset(**kwargs)
     if not inner.ids:
         raise ValueError(f"No samples found under {root}")
     if len(inner.ids) != len(set(inner.ids)):

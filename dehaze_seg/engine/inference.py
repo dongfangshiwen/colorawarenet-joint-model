@@ -8,7 +8,6 @@ import torch
 import torch.nn.functional as F
 
 from ..data.common import IMG_EXTS, find_by_stem, pil_to_rgb_tensor, mask_to_label_tensor
-from ..data.benchmarks import find_nh_clear
 from ..data.datasets import split_ids
 from ..metrics import confusion_matrix, segmentation_metrics
 from ..models.joint import JointDehazeSegModel, unpack_dehaze_output
@@ -84,8 +83,6 @@ def paired_paths(args):
 
 
 def reference_path(directory, stem, dataset):
-    if dataset == "nh-haze":
-        return find_nh_clear(directory, stem)
     path = find_by_stem(directory, stem)
     if path is None and dataset.startswith("sots-"):
         path = find_by_stem(directory, stem.split("_")[0])
