@@ -13,6 +13,7 @@ from ..losses import VGGPerceptualLoss, dehaze_losses, segmentation_losses
 from ..metrics import (AverageMeter, batch_psnr, batch_ssim, saturation_map,
                        chromaticity_ratio_error, confusion_matrix, segmentation_metrics)
 from ..models.joint import JointDehazeSegModel, unpack_dehaze_output
+from ..models.DCP import ClassicalDCP
 from ..models.registry import build_model, model_config
 from ..utils import ensure_dir, select_device, set_seed, write_csv, write_json
 from .checkpoint import save_checkpoint
@@ -23,6 +24,9 @@ def configure_stage(model, stage):
     joint = isinstance(model, JointDehazeSegModel)
     if stage not in ("dehaze", "seg", "joint") or (not joint and stage != "dehaze"):
         raise ValueError(f"Stage {stage!r} is incompatible with this model")
+    dehazer = model.dehazer if joint else model
+    if isinstance(dehazer, ClassicalDCP) and stage != "seg":
+        raise ValueError("Classical DCP stays fixed; only its downstream segmentation stage can be trained")
     model.train()
     if joint:
         for module, active in ((model.dehazer, stage != "seg"), (model.segmenter, stage != "dehaze")):
@@ -111,6 +115,12 @@ def validate(model, loader, device):
 
 
 def stage_schedule(args, strategy="full_staged"):
+    if args.model == "dcp":
+        if args.dataset != "paired-road":
+            raise ValueError("DCP training requires --dataset paired-road with hazy/, clear/ and masks/: "
+                             "only the downstream segmenter is trainable. For unlabelled benchmarks, "
+                             "use evaluate --model dcp.")
+        return [("seg", args.pretrain_seg_epochs + args.finetune_epochs)]
     if args.dataset != "paired-road":
         return [("dehaze", args.pretrain_dehaze_epochs)]
     if strategy == "direct_joint":
@@ -127,8 +137,6 @@ def stage_schedule(args, strategy="full_staged"):
 
 def run_training(args, experiment=None, experiment_name=None):
     args = deepcopy(args)
-    if args.model == "dcp":
-        raise ValueError("Classical dcp has no trainable parameters. Use predict/evaluate --model dcp without --checkpoint.")
     experiment = experiment or {}
     set_seed(args.seed)
     device = select_device(args.device)
@@ -147,7 +155,14 @@ def run_training(args, experiment=None, experiment_name=None):
         setattr(args, key, value)
     stages = [(s, n) for s, n in stage_schedule(args, experiment.get("strategy", "full_staged")) if n > 0]
     if not stages:
+        if args.model == "dcp":
+            raise ValueError("DCP requires --pretrain-seg-epochs + --finetune-epochs > 0")
         raise ValueError("At least one training stage must have a positive epoch count")
+    train_config = dict(vars(args),
+                        training_protocol=("fixed-dcp-segmentation" if args.model == "dcp" else
+                                           "restoration-only" if not config["joint"] else
+                                           experiment.get("strategy", "full_staged")),
+                        stages=[dict(stage=s, epochs=n) for s, n in stages])
     save_dir = Path(args.output) / args.dataset / (experiment_name or args.model)
     if (save_dir / "metrics.csv").exists() or (save_dir / "last.pth").exists():
         raise ValueError(f"An experiment already exists in {save_dir}; choose another --output")
@@ -173,8 +188,11 @@ def run_training(args, experiment=None, experiment_name=None):
     scaler = torch.amp.GradScaler("cuda") if args.amp and device.type == "cuda" else None
     ensure_dir(save_dir)
     write_json(save_dir / "split.json", data_split)
-    write_json(save_dir / "config.json", dict(model_config=config, train_config=vars(args), experiment=experiment))
+    write_json(save_dir / "config.json", dict(model_config=config, train_config=train_config, experiment=experiment))
     print(f"Device: {device}; train {len(train_ids)}, validation {len(val_ids)}; split: {data_split['grouping']}")
+    if args.model == "dcp":
+        print(f"DCP remains fixed; training LiteAttentionUNet for {stages[0][1]} epochs with CE + Dice. "
+              "--pretrain-dehaze-epochs is unused; no dehazing or joint optimization stage is run.")
     rows, final_stats = [], {}
     for stage, epochs in stages:
         configure_stage(model, stage)
@@ -202,7 +220,7 @@ def run_training(args, experiment=None, experiment_name=None):
                 row.update({f"val_{key}_{i}": v for i, v in enumerate(final_stats.get(key, []))})
             rows.append(row)
             write_csv(save_dir / "metrics.csv", rows)
-            save_args = (model, config, vars(args), stage, epoch, final_stats, optimizer, scheduler, scaler)
+            save_args = (model, config, train_config, stage, epoch, final_stats, optimizer, scheduler, scaler)
             save_checkpoint(save_dir / stage / "last.pth", *save_args, data_split=data_split)
             if improved:
                 save_checkpoint(save_dir / stage / "best.pth", *save_args, data_split=data_split)

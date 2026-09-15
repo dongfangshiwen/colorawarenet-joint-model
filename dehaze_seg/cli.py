@@ -41,9 +41,12 @@ def training(parser):
     parser.add_argument("--val-ratio", type=float, default=.15)
     parser.add_argument("--split-unit", choices=("sample", "scene"),
                         help="Default: scene for roads/SOTS, sample for HSTS; sample reproduces historical ID splitting")
-    parser.add_argument("--pretrain-dehaze-epochs", type=nonnegative, default=60)
-    parser.add_argument("--pretrain-seg-epochs", type=nonnegative, default=20)
-    parser.add_argument("--finetune-epochs", type=nonnegative, default=20)
+    parser.add_argument("--pretrain-dehaze-epochs", type=nonnegative, default=60,
+                        help="Restoration pretraining epochs; unused for classical DCP")
+    parser.add_argument("--pretrain-seg-epochs", type=nonnegative, default=20,
+                        help="Segmentation epochs; DCP trains segmentation for this + finetune-epochs")
+    parser.add_argument("--finetune-epochs", type=nonnegative, default=20,
+                        help="Joint fine-tuning epochs; DCP adds these to its fixed-dehazer segmentation stage")
     parser.add_argument("--direct-joint-epochs", type=nonnegative, default=100)
     parser.add_argument("--num-classes", type=positive, default=2)
     parser.add_argument("--color-base-ch", type=positive, default=32)

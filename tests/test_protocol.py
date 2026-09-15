@@ -1,10 +1,12 @@
 """Regression tests for the manuscript's training and comparison protocols."""
 from copy import deepcopy
+import csv
 import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -15,7 +17,7 @@ from dehaze_seg.data.datasets import make_dataset
 from dehaze_seg.data.splits import training_split, training_overlap
 from dehaze_seg.engine.checkpoint import load_checkpoint, save_checkpoint, historical_config
 from dehaze_seg.engine.inference import infer_image, run_inference, select_split, use_shared_segmenter
-from dehaze_seg.engine.train import run_training
+from dehaze_seg.engine.train import configure_stage, run_training, stage_schedule
 from dehaze_seg.experiments.ablations import EXPERIMENTS
 from dehaze_seg.models.DCP import ClassicalDCP, DCPDehaze
 from dehaze_seg.models.registry import build_model, model_config, constructor_defaults
@@ -87,9 +89,64 @@ class ProtocolTests(unittest.TestCase):
         from dehaze_seg.data.common import pil_to_rgb_tensor
         prediction = infer_image(dcp, image, torch.device("cpu"))[0]
         torch.testing.assert_close(prediction, dcp(pil_to_rgb_tensor(image)[None])[0], rtol=0, atol=0)
-        args = build_parser().parse_args(["train", "--model", "dcp", "--data-root", "nonexistent"])
-        with self.assertRaisesRegex(ValueError, "no trainable parameters"):
-            run_training(args)
+
+    def test_dcp_segmentation_training_and_roundtrip(self):
+        parser = build_parser()
+        defaults = parser.parse_args(["train", "--model", "dcp"])
+        self.assertEqual(stage_schedule(defaults), [("seg", 40)])
+        for dataset in ("sots-indoor", "sots-outdoor", "hsts"):
+            unlabelled = parser.parse_args(["train", "--model", "dcp", "--dataset", dataset,
+                                           "--data-root", "nonexistent"])
+            with self.assertRaisesRegex(ValueError, "requires --dataset paired-road"):
+                run_training(unlabelled)
+        empty = parser.parse_args(["train", "--model", "dcp", "--pretrain-seg-epochs", "0",
+                                   "--finetune-epochs", "0", "--data-root", "nonexistent"])
+        with self.assertRaisesRegex(ValueError, "finetune-epochs > 0"):
+            run_training(empty)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            road_data(root / "data")
+            args = parser.parse_args(["train", "--model", "dcp", "--data-root", str(root / "data"),
+                "--output", str(root / "runs"), "--resize", "32", "32", "--seg-base-ch", "8",
+                "--pretrain-seg-epochs", "1", "--finetune-epochs", "1", "--no-plots", "--device", "cpu"])
+            config = model_config("dcp", joint=True)
+            config["segmenter"]["base_ch"] = 8
+            model = build_model(config)
+            before = {k: v.clone() for k, v in model.segmenter.named_parameters()}
+            probe = torch.rand(1, 3, 32, 32)
+            fixed_prediction = model.dehazer(probe)[0].clone()
+            with self.assertRaisesRegex(ValueError, "stays fixed"):
+                configure_stage(model, "joint")
+            with patch("dehaze_seg.engine.train.build_model", return_value=model), \
+                 patch("dehaze_seg.engine.train.VGGPerceptualLoss", side_effect=AssertionError("DCP needs no VGG")):
+                stats = run_training(args)
+            self.assertIn("miou", stats)
+            self.assertTrue(any(not torch.equal(before[k], v) for k, v in model.segmenter.named_parameters()))
+            self.assertEqual(sum(p.numel() for p in model.dehazer.parameters()), 0)
+            self.assertFalse(model.dehazer.training)
+            torch.testing.assert_close(fixed_prediction, model.dehazer(probe)[0], rtol=0, atol=0)
+            output = root / "runs/paired-road/dcp"
+            with (output / "metrics.csv").open(encoding="utf-8", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual([row["stage"] for row in rows], ["seg", "seg"])
+            self.assertEqual(rows[0]["val_psnr"], rows[1]["val_psnr"])
+            self.assertFalse((output / "dehaze").exists() or (output / "joint").exists())
+            loaded, loaded_config, checkpoint = load_checkpoint(output / "last.pth")
+            self.assertIsInstance(loaded.dehazer, ClassicalDCP)
+            self.assertEqual(loaded_config, config)
+            self.assertEqual(checkpoint["train_config"]["training_protocol"], "fixed-dcp-segmentation")
+            self.assertEqual(checkpoint["train_config"]["stages"], [dict(stage="seg", epochs=2)])
+            self.assertEqual(checkpoint["stage"], "seg")
+            self.assertEqual(checkpoint["data_split"]["shared_clear_references"], [])
+            with torch.no_grad():
+                for expected, actual in zip(model(probe)[:2], loaded(probe)[:2]):
+                    torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+            predict_args = parser.parse_args(["predict", "--checkpoint", str(output / "best.pth"),
+                "--input", str(root / "data/hazy/000.png"), "--output", str(root / "predict"), "--device", "cpu"])
+            result = run_inference(predict_args)[0]
+            self.assertEqual((result["model"], result["implementation"], result["segmentation"]),
+                             ("dcp", "classical", "checkpoint"))
+            self.assertTrue((root / "predict/masks/000.png").is_file())
 
     def test_historical_dcp_roundtrip_keeps_one_public_name(self):
         config = model_config("dcp", joint=False)

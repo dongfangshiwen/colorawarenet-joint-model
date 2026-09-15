@@ -209,7 +209,7 @@ These are the original figures embedded in the supplied manuscript. Click either
 | :--- | :--- |
 | `coloraware` | **ColorAwareUNet**, the paper's main dehazer |
 | `c2pnet` | C2PNet implementation in this repository |
-| `dcp` | Parameter-free dark-channel prior with guided transmission refinement; no training or checkpoint required |
+| `dcp` | Fixed dark-channel prior with guided transmission refinement; optionally train its downstream LiteAttentionUNet on road masks |
 | `ffanet` | FFA-Net implementation in this repository |
 | `grid` | GridDehazeNet implementation in this repository |
 | `psd` | PSDDehazeNet implementation in this repository |
@@ -298,10 +298,29 @@ Train a neural dehazing baseline on the same road split, then evaluate it with t
 python train.py --dataset paired-road --data-root datasets --model c2pnet --pretrain-seg-epochs 0 --finetune-epochs 0 --output runs/comparison --device cuda --amp
 ```
 
-This command updates only the dehazer. Its checkpoint's untrained segmenter must be replaced using `--segmenter-checkpoint` in the comparison below. Omitting the two zero-epoch options enables a separate joint-training experiment. Classical `dcp` runs directly through `predict` or `evaluate`; `train --model dcp` reports that it has no trainable parameters.
+This command updates only the dehazer. Its checkpoint's untrained segmenter must be replaced using `--segmenter-checkpoint` in the comparison below. Omitting the two zero-epoch options enables a separate joint-training experiment.
+
+### Train segmentation after DCP
+
+`train.py --model dcp` keeps classical DCP fixed and trains **LiteAttentionUNet** from its restored images. It requires the labelled `paired-road` dataset with `hazy/`, `clear/` and `masks/`:
+
+```bash
+python train.py --model dcp --dataset paired-road --data-root datasets --output runs/dcp-seg --device cuda --amp
+```
+
+The default is one **40-epoch segmentation stage**: `--pretrain-seg-epochs 20` plus `--finetune-epochs 20`. To train for a different total, set these options explicitly, for example `--pretrain-seg-epochs 40 --finetune-epochs 0`. `--pretrain-dehaze-epochs` is unused for DCP. Only CE + Dice updates the segmenter; DCP predictions stay fixed, no joint optimization is run, and VGG weights are not needed. SOTS and HSTS have no segmentation masks, so use `evaluate --model dcp` for those datasets.
+
+Weights are saved under `runs/dcp-seg/paired-road/dcp/`, with `best.pth`, `last.pth` and `seg/{best,last}.pth`. The best model is selected by validation mIoU. Configuration files and checkpoints record `fixed-dcp-segmentation` and the effective epoch schedule.
+
+```bash
+python -m dehaze_seg predict --checkpoint runs/dcp-seg/paired-road/dcp/best.pth --input datasets/hazy/001.png --output results/dcp-seg-predict
+python -m dehaze_seg evaluate --checkpoint runs/dcp-seg/paired-road/dcp/best.pth --dataset paired-road --data-root datasets --split val --output results/dcp-seg-eval
+```
+
+This is an additional downstream training experiment. For the manuscript's shared-segmenter comparison, pass the **same** `--segmenter-checkpoint` for every dehazer as shown below; independently trained per-method segmenters define a different experiment.
 
 <details>
-<summary><strong>SOTS and augmented HSTS commands</strong></summary>
+<summary><strong>Neural dehazer training: SOTS-style data and augmented HSTS</strong></summary>
 
 ```bash
 python train.py --dataset sots-indoor --data-root datasets/ITS/train --val-root datasets/ITS/val --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
@@ -328,6 +347,8 @@ Benchmark training runs only `--pretrain-dehaze-epochs`, with restoration superv
 | `--workers`, `--threads` | Loader workers: 0; CPU threads: 4 |
 | `--use-se`, `--no-attention`, `--no-imagenet-norm` | Change the segmenter's default configuration |
 | `--output` | Parent directory for a new experiment |
+
+For DCP, the two segmentation-related epoch options are summed into a single frozen-dehazer stage, as described above.
 
 ### Training outputs
 
@@ -483,7 +504,7 @@ The package provides `train`, `predict`, `evaluate`, `ablate` and `visualize` th
 python -m unittest discover -s tests -v
 ```
 
-**19 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation and classical DCP. They do not download datasets or VGG weights.
+**20 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation and training segmentation after fixed DCP. They do not download datasets or VGG weights.
 
 Additional local checks verified the 185 road triplets, a small three-stage training run, prediction/evaluation/ablation/visualization workflows, and inference with an existing historical checkpoint. **CUDA execution and full paper training were not validated.** No reproduction scores are claimed here.
 

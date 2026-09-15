@@ -218,7 +218,7 @@ datasets/
 |---|---|
 | `coloraware` | 论文主去雾模型 ColorAwareUNet |
 | `c2pnet` | 仓库中的 C2PNet 实现 |
-| `dcp` | 无可训练参数的暗通道先验，使用引导滤波细化透射率；无需训练或权重 |
+| `dcp` | 固定暗通道先验，使用引导滤波细化透射率；支持利用道路标注训练后面的 LiteAttentionUNet |
 | `ffanet` | 仓库中的 FFA-Net 实现 |
 | `grid` | 仓库中的 GridDehazeNet 实现 |
 | `psd` | 仓库中的 PSDDehazeNet 实现 |
@@ -310,10 +310,29 @@ python train.py --data-root datasets --device cpu --resize 64 64 --batch-size 2 
 python train.py --dataset paired-road --data-root datasets --model c2pnet --pretrain-seg-epochs 0 --finetune-epochs 0 --output runs/comparison --device cuda --amp
 ```
 
-该命令只更新去雾器；其权重中未训练的分割器需要在下方比较命令中通过 `--segmenter-checkpoint` 替换。省略两个零轮数选项可开展独立联合训练实验。经典 `dcp` 直接使用 `predict` 或 `evaluate`；`train --model dcp` 会提示模型没有可训练参数。
+该命令只更新去雾器；其权重中未训练的分割器需要在下方比较命令中通过 `--segmenter-checkpoint` 替换。省略两个零轮数选项可开展独立联合训练实验。
+
+### 训练 DCP 后面的分割网络
+
+`train.py --model dcp` 固定经典 DCP，利用它的去雾结果训练 **LiteAttentionUNet**。需要带标注的 `paired-road` 数据，即 `hazy/`、`clear/` 和 `masks/`：
+
+```bash
+python train.py --model dcp --dataset paired-road --data-root datasets --output runs/dcp-seg --device cuda --amp
+```
+
+默认只执行一个 **40 轮分割阶段**：`--pretrain-seg-epochs 20` 加上 `--finetune-epochs 20`。可以明确设置总轮数，例如 `--pretrain-seg-epochs 40 --finetune-epochs 0`。DCP 不使用 `--pretrain-dehaze-epochs`；仅由 CE＋Dice 更新分割器，DCP 预测保持固定，不执行联合优化，也不需要 VGG 权重。SOTS 和 HSTS 没有分割标注，应使用 `evaluate --model dcp` 做去雾评估。
+
+权重保存到 `runs/dcp-seg/paired-road/dcp/`，包含 `best.pth`、`last.pth` 和 `seg/{best,last}.pth`，按验证集 mIoU 选择最优模型。配置文件和权重会记录 `fixed-dcp-segmentation` 及实际训练轮数。
+
+```bash
+python -m dehaze_seg predict --checkpoint runs/dcp-seg/paired-road/dcp/best.pth --input datasets/hazy/001.png --output results/dcp-seg-predict
+python -m dehaze_seg evaluate --checkpoint runs/dcp-seg/paired-road/dcp/best.pth --dataset paired-road --data-root datasets --split val --output results/dcp-seg-eval
+```
+
+这是一项额外的下游训练实验。执行论文的共用分割器比较时，仍应按下方命令为所有去雾方法指定**同一个** `--segmenter-checkpoint`；各方法单独训练分割器属于不同实验。
 
 <details>
-<summary><strong>展开 SOTS 与增强 HSTS 命令</strong></summary>
+<summary><strong>神经网络去雾训练：SOTS 格式数据与增强 HSTS</strong></summary>
 
 ```bash
 python train.py --dataset sots-indoor --data-root datasets/ITS/train --val-root datasets/ITS/val --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
@@ -340,6 +359,8 @@ python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/
 | `--workers`、`--threads` | 数据加载进程：0；CPU 线程：4 |
 | `--use-se`、`--no-attention`、`--no-imagenet-norm` | 修改分割网络的默认配置 |
 | `--output` | 新实验的输出父目录 |
+
+DCP 会将两个分割相关的轮数选项相加，合并为一个固定去雾器的分割阶段，详见上方说明。
 
 ### 训练输出
 
@@ -508,7 +529,7 @@ tests/               # CPU 回归检查
 python -m unittest discover -s tests -v
 ```
 
-在[安装说明](#installation)列出的本机环境中，**19 项 CPU 回归测试通过**，覆盖模型前向、只放大增益的实际学习、attention/SE 变体、数据配对、同步增强、阶段冻结、参数更新、严格权重往返加载、场景隔离、共用冻结分割器及经典 DCP。测试不会下载数据或 VGG 权重。
+在[安装说明](#installation)列出的本机环境中，**20 项 CPU 回归测试通过**，覆盖模型前向、只放大增益的实际学习、attention/SE 变体、数据配对、同步增强、阶段冻结、参数更新、严格权重往返加载、场景隔离、共用冻结分割器，以及固定 DCP 后训练分割网络。测试不会下载数据或 VGG 权重。
 
 另已检查 185 组道路三元组、小样本三阶段训练、推理/评估/消融/可视化流程，以及现有历史权重的推理。**尚未验证 CUDA 运行与论文完整训练**，这里不提供未经复现的成绩。
 
