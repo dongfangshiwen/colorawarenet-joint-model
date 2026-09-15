@@ -162,7 +162,9 @@ datasets/
 
 按文件主名配对，扩展名可以不同。图像使用 RGB；二分类标注为背景 0、道路 1，也支持灰度 0/255。标注缩放使用最近邻插值，几何增强同步作用于图像和标注。
 
-默认先排序样本 ID，再以 Python 随机种子 42 打乱，按 0.15 划分验证集：**训练 157 组，验证 28 组，无独立测试集**。每次训练保存 `split.json`，后续道路评估优先使用该文件。
+新道路实验默认先按文件内容完全相同的清晰参考图分组，再以 seed=42、验证比例 0.15 划分。本地核查的 185 组数据仍得到**训练 157 组、验证 28 组，无独立测试集**。整个场景组不会拆开；其他数据的实际数量可能因组大小略有变化。每次训练在 `split.json` 和权重中保存实际 ID、分组规则与哈希。
+
+本地数据有五组共用清晰参考图的样本：`058/114`、`062/130`、`063/140`、`177/179`、`181/182`。历史按 ID 划分时，验证样本 `114`、`181` 与训练集跨组共用参考图。订正的场景划分改变了具体样本归属，需要重新训练，不能宣称等同于原实验划分或成绩。`--split-unit sample` 可用于核查历史 ID 划分，并记录参考图重叠。旧权重沿用其保存的划分；不能直接换成新划分评估旧权重，就认为数据已独立。
 
 ### 基准数据集
 
@@ -216,12 +218,12 @@ datasets/
 |---|---|
 | `coloraware` | 论文主去雾模型 ColorAwareUNet |
 | `c2pnet` | 仓库中的 C2PNet 实现 |
-| `dcp` | DCP 加可训练细化分支；当前默认会启用细化，不能视为纯经典 DCP |
+| `dcp` | 无可训练参数的暗通道先验，使用引导滤波细化透射率；无需训练或权重 |
 | `ffanet` | 仓库中的 FFA-Net 实现 |
 | `grid` | 仓库中的 GridDehazeNet 实现 |
 | `psd` | 仓库中的 PSDDehazeNet 实现 |
 
-论文第 4.1.5 节的下游比较要求各去雾方法**共用同一个冻结的 LiteAttentionUNet 权重**，不针对各方法单独微调分割器。对比模型保留本仓库已有实现与参数，不宣称与原作者官方代码、权重或结果完全一致。
+论文第 4.1.5 节的下游比较要求各去雾方法**共用同一个冻结的 LiteAttentionUNet 权重**，不针对各方法单独微调分割器；通过 `--segmenter-checkpoint` 执行此协议。神经网络对比模型沿用本仓库实现，不宣称与原作者官方代码、权重或结果完全一致。公开名称统一为 `dcp`：不传权重时运行经典恢复公式；加载历史 DCP 权重时恢复原增强实现，结果标记为 `historical-enhanced`。
 
 ### 论文主配置
 
@@ -302,24 +304,26 @@ python train.py --data-root datasets --device cpu --resize 64 64 --batch-size 2 
 
 ### 对比模型
 
-通过 `--model` 选择保留的去雾对比模型，开展可选的联合训练实验：
+在同一道路划分上训练神经网络去雾对比模型，再接入共用冻结分割器评估：
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model c2pnet --output runs/comparison --device cuda --amp
+python train.py --dataset paired-road --data-root datasets --model c2pnet --pretrain-seg-epochs 0 --finetune-epochs 0 --output runs/comparison --device cuda --amp
 ```
 
-该命令会为本次训练单独训练分割器。论文第 4.1.5 节的下游比较需要将所有去雾器接入同一个冻结分割器进行评估；独立联合训练的结果应作为单独实验报告。
+该命令只更新去雾器；其权重中未训练的分割器需要在下方比较命令中通过 `--segmenter-checkpoint` 替换。省略两个零轮数选项可开展独立联合训练实验。经典 `dcp` 直接使用 `predict` 或 `evaluate`；`train --model dcp` 会提示模型没有可训练参数。
 
 <details>
 <summary><strong>展开 SOTS 与增强 HSTS 命令</strong></summary>
 
 ```bash
-python train.py --dataset sots-indoor --data-root SOTS/indoor --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
-python train.py --dataset sots-outdoor --data-root SOTS/outdoor --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
+python train.py --dataset sots-indoor --data-root datasets/ITS/train --val-root datasets/ITS/val --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
+python train.py --dataset sots-outdoor --data-root datasets/OTS/train --val-root datasets/OTS/val --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
 python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/hsts --device cuda --amp
 ```
 
-基准数据集只执行 `--pretrain-dehaze-epochs`，使用去雾监督。示例采用论文记载的 512×512 输入和 1e-4 学习率，batch size 2 与去雾 60 轮沿用仓库默认配置。HSTS 使用配对增强，`--train-repeats 4` 为可调整的重复次数示例。
+请准备相互独立的 ITS/OTS 训练和验证目录，各自包含 `hazy/` 与 `clear/` 或 `gt/`。上述路径仅演示目录组织，不代表仓库提供了官方划分。SOTS 测试图像放在 `SOTS/indoor`、`SOTS/outdoor`，不参与训练或模型选择。`--dataset sots-*` 选择的是配对适配器，不表示可以在 SOTS 测试集上训练。省略 `--val-root` 时，按清晰参考图的 SHA-256 分组划分，同一场景的不同雾图进入同一组；此时验证比例作用于场景组。
+
+基准数据集只执行 `--pretrain-dehaze-epochs`，使用去雾监督。示例采用 512×512 输入、1e-4 学习率、batch size 2 和去雾 60 轮。HSTS 命令属于内部增强实验，应评估保存的验证划分，不能对训练目录全量评估后作为独立测试成绩。`--train-repeats 4` 为可调整示例，不是官方 HSTS 协议。
 
 </details>
 
@@ -330,6 +334,8 @@ python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/
 | `--pretrain-dehaze-epochs`、`--pretrain-seg-epochs`、`--finetune-epochs` | 三阶段轮数：60 / 20 / 20 |
 | `--resize H W`、`--batch-size` | 输入尺寸与批大小：512 512 / 2 |
 | `--seed`、`--val-ratio` | 划分种子与验证比例：42 / 0.15 |
+| `--val-root` | 独立验证目录；此时训练根目录中的全部样本用于训练 |
+| `--split-unit` | 道路/SOTS 默认 `scene`，HSTS 默认 `sample`；`sample` 使用历史按 ID 划分 |
 | `--device`、`--amp` | `auto`、`cpu` 或 `cuda`；按需启用 CUDA 混合精度 |
 | `--workers`、`--threads` | 数据加载进程：0；CPU 线程：4 |
 | `--use-se`、`--no-attention`、`--no-imagenet-norm` | 修改分割网络的默认配置 |
@@ -340,7 +346,7 @@ python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/
 ```text
 runs/paper/paired-road/coloraware/
 ├── config.json          # 完整模型、训练和实验配置
-├── split.json           # 实际训练/验证样本 ID
+├── split.json           # 样本 ID、根目录、分组规则与清晰参考图哈希
 ├── metrics.csv
 ├── final_metrics.json   # 最后一轮模型的验证指标
 ├── dehaze/{best,last}.pth
@@ -364,7 +370,7 @@ python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best
 python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best.pth --input datasets/hazy --output results/batch
 ```
 
-输出包括去雾图、类别编号 PNG、分割叠加图和拼图；纯去雾权重只输出去雾结果。预测保留原图尺寸，内部补齐至 16 的倍数；可用 `--resize H W` 降低推理开销，结果会插值回原尺寸。
+输出包括去雾图、类别编号 PNG、分割叠加图和拼图；纯去雾权重指定 `--segmenter-checkpoint` 后也可输出分割结果。神经网络输入内部补齐至 16 的倍数，经典 DCP 使用未补齐的图像。预测保留原图尺寸；可用 `--resize H W` 降低推理开销，结果会插值回原尺寸。
 
 ### 数据集评估
 
@@ -383,27 +389,36 @@ python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/bes
 python -m dehaze_seg evaluate --checkpoint runs/sots/sots-indoor/coloraware/best.pth --dataset sots-indoor --data-root SOTS/indoor --split all --output results/sots-eval
 ```
 
-道路评估默认 `val`，其他数据集默认 `all`。可通过 `--split-file` 指定保存的划分。旧权重无划分文件时，按保存的 seed/val_ratio 重建；重建要求数据集合保持一致。训练时对 SOTS 的内部划分用于监控，按雾图 ID 划分而非按场景分组，不能将其称为独立标准测试结果。
+对已知训练或验证根目录，评估默认使用保存的验证划分；独立基准测试目录默认 `all`，道路评估默认 `val`。可通过 `--split-file` 明确指定划分。指定共用分割器时，默认从它的权重中读取划分，所有对比模型使用同一有序样本列表。权重若使用独立 `--val-root` 训练，验证时会提示使用该目录。
+
+评估会拒绝与去雾器或共用分割器训练数据存在已知重叠的样本，包括清晰参考文件哈希相同的复制数据。`--allow-training-overlap` 仅用于显式诊断，并在结果中记录重叠数量。这些检查不能证明未知训练历史的独立性，也无法识别所有经过变换或重新编码的副本。旧权重缺少划分清单时，会按 seed/val_ratio 重建请求的划分，要求数据内容未变；重建本身不构成独立测试集。
 
 `--metric-align crop` 默认将尺寸不一致的预测与参考图中心裁剪到共同区域；`resize` 将参考图缩放到预测尺寸；`none` 要求尺寸完全相同。训练保持原有数据预处理方式，评估默认原尺寸，因此训练日志与原尺寸评估结果可能不同。
 
-评估保存逐图 `metrics.csv` 和汇总 `summary.json`。恢复指标按图平均，分割指标由全数据混淆矩阵计算。与旧脚本相比，验证 PSNR 改为逐图平均，不再先按 batch 混合 MSE，以避免 batch size 改变汇总值。`--save-images` 保存评估图片，`--limit 1` 可只检查一张。
+评估保存逐图 `metrics.csv`、汇总 `summary.json`，并在 `protocol.json` 记录样本 ID、模型配置、清晰参考和共用分割器来源。恢复指标按图平均，分割指标由全数据混淆矩阵计算；验证 PSNR 也按图平均。`--save-images` 保存评估图片，`--limit 1` 可只检查一张。
 
 ### 多模型比较
 
-多个权重可在同一命令中比较，生成各自结果、汇总表和对比拼图：
+按照论文第 4.1.5 节的共用冻结分割器协议比较多个去雾模型，生成各自结果、汇总表和对比拼图：
 
 ```bash
-python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best.pth runs/comparison/paired-road/c2pnet/best.pth --input datasets/hazy --limit 5 --output results/comparison
+python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/best.pth runs/comparison/paired-road/c2pnet/best.pth --include-dcp --segmenter-checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --save-images --output results/comparison
 ```
 
-此命令使用各联合权重自身保存的分割器，不会自动替换为论文下游比较协议要求的共用冻结分割器。
+共用分割器只加载一次，冻结参数并保持 eval 模式；所有去雾方法使用它保存的归一化配置，包括纯去雾权重和经典 DCP。结果记录该权重路径及 SHA-256；各模型自带的分割器会被替换。省略该参数则使用各权重自己的分割器，属于另一种协议。请在比较前固定共用权重，不要依据测试结果选择它。历史共用权重必要时可通过 `--segmenter-model`、`--segmenter-legacy-profile`、`--segmenter-model-config` 补充配置。
+
+经典 DCP 也可以单独运行，公开名称保持为 `dcp`：
+
+```bash
+python -m dehaze_seg predict --model dcp --input datasets/hazy/001.png --output results/dcp
+python -m dehaze_seg evaluate --model dcp --segmenter-checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --output results/dcp-eval
+```
 
 <a id="checkpoints"></a>
 
 ## 权重加载
 
-新权重保存完整 `model_config`，加载时自动恢复结构和数值配置。支持历史 `model_state`、`model_state_dict`、`state_dict`、`dehazer_state` 字典，以及常见外层前缀。历史联合训练权重中保存的 `args` 会映射为论文训练配置。
+新权重保存完整 `model_config`、训练配置及实际数据划分，包含根目录与清晰参考图哈希。加载时自动恢复结构和数值配置。支持历史 `model_state`、`model_state_dict`、`state_dict`、`dehazer_state` 字典，以及常见外层前缀。历史 `args` 会映射为对应配置。旧 `gain_local` 权重保留原来的增益下限，订正后的默认值只用于新实验。
 
 ```bash
 python -m dehaze_seg predict --checkpoint weights/colorawareunet.pth --input datasets/hazy/001.png --resize 512 512 --output results/legacy
@@ -439,6 +454,19 @@ python -m dehaze_seg ablate --data-root datasets --experiments attention_none,at
 </details>
 
 还提供训练策略、损失、模型容量、数据增强、输入归一化和直接雾图分割实验。`--experiments all` 运行完整注册表。所有消融共享训练流程、随机划分和指标；结果按实验名称保存，并汇总到 `ablation_summary.csv`。
+
+### 复现实验说明
+
+| 设置 | 当前实现与适用范围 |
+| :--- | :--- |
+| 表 4 局部增益 | `gain_local`：局部 tanh、scale=0.30，**关闭下限**（`gain_min=None`） |
+| 表 4 只放大增益 | 保留 `1 + 0.30 × tanh(ReLU(raw))`；增益末层权重初始化为零，偏置为 **0.001**，使梯度能通过 ReLU。主模型 tanh 仍使用零初始化。 |
+| 历史只放大实验 | 末层全零初始化会让增益头无法学习。加载仍保留已保存的权重；订正实验需要重新训练。论文中统一零初始化的表述需要补充这一例外。 |
+| 弱 / 强增益 | 仓库设置为 `(scale, min)=(0.10, 0.98)` / `(0.50, 0.90)`；论文未明确这些具体数值。局部平滑核为 15。 |
+| 表 6 attention / SE | 已注册四种组合。表中 5.878 / 5.944 / 6.097 / 6.164 M 对应**联合模型**参数量，不是单独分割器；当前每个变体执行完整三阶段训练。 |
+| 消融汇总 | `ablation_summary.csv` 记录末轮验证指标，不是重新评估 `best.pth` 的结果；每阶段从前阶段末轮参数继续训练。 |
+
+论文尚未完整说明注意力实验的训练预算、冻结范围和全部模型选择设置；声称数值复现前，需要对照原始日志确认。训练器各阶段记录活动损失，在仅训练分割器时不会额外记录去雾训练损失，因此仅凭当前 CSV 不能完整重绘图 6(a)。CPU 回归检查已覆盖订正流程；尚未重新验证 CUDA、完整训练及论文报告的成绩。
 
 ### 可视化
 
@@ -480,7 +508,7 @@ tests/               # CPU 回归检查
 python -m unittest discover -s tests -v
 ```
 
-在[安装说明](#installation)列出的本机环境中，**11 项 CPU 回归测试通过**，覆盖模型前向、增益/attention/SE 变体、数据配对、同步增强、阶段冻结、参数更新与权重保存/重载。测试不会下载数据或 VGG 权重。
+在[安装说明](#installation)列出的本机环境中，**19 项 CPU 回归测试通过**，覆盖模型前向、只放大增益的实际学习、attention/SE 变体、数据配对、同步增强、阶段冻结、参数更新、严格权重往返加载、场景隔离、共用冻结分割器及经典 DCP。测试不会下载数据或 VGG 权重。
 
 另已检查 185 组道路三元组、小样本三阶段训练、推理/评估/消融/可视化流程，以及现有历史权重的推理。**尚未验证 CUDA 运行与论文完整训练**，这里不提供未经复现的成绩。
 

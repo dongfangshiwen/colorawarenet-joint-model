@@ -31,6 +31,7 @@ def training(parser):
     runtime(parser)
     parser.add_argument("--dataset", choices=DATASETS, default="paired-road")
     parser.add_argument("--data-root", default="datasets")
+    parser.add_argument("--val-root", help="Independent validation root with the same layout; otherwise split training data")
     parser.add_argument("--model", choices=MODELS, default="coloraware")
     parser.add_argument("--output", default="runs")
     parser.add_argument("--resize", type=positive, nargs=2, default=[512, 512], metavar=("H", "W"))
@@ -38,6 +39,8 @@ def training(parser):
     parser.add_argument("--workers", type=nonnegative, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-ratio", type=float, default=.15)
+    parser.add_argument("--split-unit", choices=("sample", "scene"),
+                        help="Default: scene for roads/SOTS, sample for HSTS; sample reproduces historical ID splitting")
     parser.add_argument("--pretrain-dehaze-epochs", type=nonnegative, default=60)
     parser.add_argument("--pretrain-seg-epochs", type=nonnegative, default=20)
     parser.add_argument("--finetune-epochs", type=nonnegative, default=20)
@@ -63,8 +66,13 @@ def training(parser):
 
 def inference(parser, evaluate=False):
     runtime(parser)
-    parser.add_argument("--checkpoint", nargs="+", required=True, help="One or more checkpoints")
-    parser.add_argument("--model", choices=MODELS, help="Identifier for weights without metadata")
+    parser.add_argument("--checkpoint", nargs="+", help="One or more checkpoints")
+    parser.add_argument("--model", choices=MODELS, help="Identifier for legacy weights; --model dcp also runs without weights")
+    parser.add_argument("--include-dcp", action="store_true", help="Include parameter-free DCP in a checkpoint comparison")
+    parser.add_argument("--segmenter-checkpoint", help="Reuse this joint checkpoint's frozen segmenter for EVERY dehazer")
+    parser.add_argument("--segmenter-legacy-profile", choices=PROFILES)
+    parser.add_argument("--segmenter-model", choices=MODELS, help="Model identifier for a metadata-free segmenter source")
+    parser.add_argument("--segmenter-model-config", help="JSON model config for a metadata-free segmenter source")
     parser.add_argument("--legacy-profile", choices=PROFILES)
     parser.add_argument("--model-config", help="Complete model configuration JSON for metadata-free weights")
     parser.add_argument("--output", default="results/evaluate" if evaluate else "results/predict")
@@ -73,8 +81,9 @@ def inference(parser, evaluate=False):
     if evaluate:
         parser.add_argument("--dataset", choices=DATASETS, default="paired-road")
         parser.add_argument("--data-root", default="datasets")
-        parser.add_argument("--split", choices=("all", "train", "val"), help="Default: val for paired-road, all for benchmarks")
+        parser.add_argument("--split", choices=("all", "train", "val"), help="Default: saved validation on a known training root; all on an independent benchmark root")
         parser.add_argument("--split-file", help="Saved split.json")
+        parser.add_argument("--allow-training-overlap", action="store_true", help="Explicit diagnostic only: allow known training samples in evaluation")
         parser.add_argument("--metric-align", choices=("crop", "resize", "none"), default="crop")
         parser.add_argument("--save-images", action="store_true")
     else:

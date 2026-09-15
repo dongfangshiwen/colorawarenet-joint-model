@@ -4,7 +4,7 @@ import inspect
 
 from .C2PNet import C2PNet
 from .ColorAwareUnet import ColorAwareUNet
-from .DCP import DCPDehaze
+from .DCP import ClassicalDCP, DCPDehaze
 from .FFANet import FFANet
 from .GridDehazeNet import GridDehazeNet
 from .LiteAttentionUnet import LiteAttentionUNet
@@ -13,13 +13,14 @@ from .joint import IdentityDehazer, JointDehazeSegModel
 
 MODELS = {
     "coloraware": ColorAwareUNet, "c2pnet": C2PNet,
-    "dcp": DCPDehaze, "ffanet": FFANet, "grid": GridDehazeNet, "psd": PSDDehazeNet,
+    "dcp": ClassicalDCP,
+    "ffanet": FFANet, "grid": GridDehazeNet, "psd": PSDDehazeNet,
 }
 OVERRIDES = {
     "coloraware": dict(base_ch=32, residual_scale=.5, gain_scale=.30, gain_form="tanh",
                        gain_min=.95, gain_mode="global", norm="inst", refine_scale=.25),
     "c2pnet": dict(base_ch=32, blocks_per_group=6, groups=3, use_pdu=True),
-    "dcp": dict(guided_radius=7, guided_eps=1e-4, use_learned_refine=False),
+    "dcp": dict(guided_radius=7, guided_eps=1e-4),
     "ffanet": dict(base_ch=64, n_down=0, n_ffab_deep=19, groups=3),
     "grid": dict(rows=3, cols=6, base_ch=32),
     "psd": dict(base_ch=32, feat_ch=64, residual_scale=.45, refine_scale=.15, t_min=.10),
@@ -46,8 +47,12 @@ def build_model(config):
     name = config["model"]
     if name not in MODELS:
         raise ValueError(f"Unsupported model {name!r}; supported: {', '.join(MODELS)}")
-    dehazer = (IdentityDehazer() if config.get("dehazer_type") == "identity"
-               else MODELS[name](**config["dehazer"]))
+    if config.get("dehazer_type") == "identity":
+        dehazer = IdentityDehazer()
+    elif name == "dcp" and config.get("dehazer_type") == "legacy-dcp":
+        dehazer = DCPDehaze(**config["dehazer"])
+    else:
+        dehazer = MODELS[name](**config["dehazer"])
     if not config["joint"]:
         return dehazer
     return JointDehazeSegModel(dehazer, LiteAttentionUNet(**config["segmenter"]),

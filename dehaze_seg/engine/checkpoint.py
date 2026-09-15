@@ -5,7 +5,8 @@ from pathlib import Path
 
 import torch
 
-from ..models.registry import build_model, model_config, MODELS
+from ..models.registry import build_model, model_config, MODELS, constructor_defaults
+from ..models.DCP import DCPDehaze
 
 PROFILES = ("paper", "legacy-infer")
 
@@ -45,6 +46,10 @@ def historical_config(checkpoint, state, profile=None, model_name=None):
         raise ValueError("Weights lack reconstruction settings; choose --legacy-profile paper/legacy-infer or --model-config")
     joint = any(k.startswith("segmenter.") for k in state)
     config = model_config(name, joint=joint)
+    # Keep a single public name while reconstructing old learned DCP weights.
+    if name == "dcp":
+        config["dehazer"] = constructor_defaults(DCPDehaze)
+        config["dehazer_type"] = "legacy-dcp"
     if profile == "legacy-infer":
         legacy = {
             "coloraware": dict(gain_scale=.65, gain_min=None),
@@ -72,9 +77,16 @@ def historical_config(checkpoint, state, profile=None, model_name=None):
         from ..experiments.ablations import EXPERIMENTS
         if experiment not in EXPERIMENTS:
             raise ValueError(f"Unknown historical ablation {experiment!r}; provide --model-config")
-        variant = EXPERIMENTS[experiment]
+        variant = deepcopy(EXPERIMENTS[experiment])
+        # Historical gain_local inherited the .95 floor. Never reinterpret it
+        # using the corrected Table 4 registry; explicit saved args take priority.
+        if experiment == "gain_local":
+            variant["dehazer"]["gain_min"] = .95
         config["dehazer"].update(variant.get("dehazer", {}))
         config["dehazer_type"] = variant.get("dehazer_type", "network")
+        for key in config["dehazer"]:
+            if "color_" + key in saved:
+                config["dehazer"][key] = saved["color_" + key]
     return config
 
 
@@ -89,6 +101,8 @@ def load_checkpoint(path, device="cpu", profile=None, model_name=None, config_pa
         config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     else:
         config = historical_config(checkpoint, state, profile, model_name)
+    if config["model"] == "dcp" and checkpoint.get("format_version", 1) < 2 and not config_path:
+        config["dehazer_type"] = "legacy-dcp"
     if model_name and config["model"] != model_name:
         raise ValueError(f"Requested {model_name}, but checkpoint is for {config['model']}")
     if not config["joint"] and state and all(k.startswith("dehazer.") for k in state):
@@ -102,11 +116,13 @@ def load_checkpoint(path, device="cpu", profile=None, model_name=None, config_pa
 
 
 def save_checkpoint(path, model, config, train_config, stage, epoch, stats, optimizer=None,
-                    scheduler=None, scaler=None):
+                    scheduler=None, scaler=None, data_split=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    state = dict(format_version=1, model_state=model.state_dict(), model_config=deepcopy(config),
+    state = dict(format_version=2, model_state=model.state_dict(), model_config=deepcopy(config),
                  train_config=dict(train_config), stage=stage, epoch=epoch, stats=stats)
+    if data_split is not None:
+        state["data_split"] = deepcopy(data_split)
     if optimizer is not None:
         state["optimizer_state"] = optimizer.state_dict()
     if scheduler is not None:

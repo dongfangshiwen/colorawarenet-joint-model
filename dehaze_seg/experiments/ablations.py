@@ -25,8 +25,8 @@ EXPERIMENTS: Dict[str, Dict[str, object]] = {
     },
     "gain_local": {
         "group": "color_gain",
-        "description": "Use spatial local tanh gain instead of global gain.",
-        "dehazer": dict(gain_mode="local"),
+        "description": "Table 4: spatial local tanh gain without a lower clamp.",
+        "dehazer": dict(gain_mode="local", gain_min=None),
     },
     "gain_amp": {
         "group": "color_gain",

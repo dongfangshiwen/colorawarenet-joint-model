@@ -10,11 +10,9 @@ This module follows the public DCP pipeline:
 4. edge-aware transmission refinement with guided filter
 5. radiance recovery: J(x) = (I(x) - A) / max(t(x), t0) + A
 
-DCP itself is not a trainable neural network.  For this repository's paired
-training workflow, the paper DCP result is used as the analytic core and a
-small full-resolution residual head learns only a bounded detail correction.
-This keeps the public DCP algorithm as the main path while avoiding fixed,
-over-smoothed inference outputs.
+ClassicalDCP is the parameter-free baseline (registry name 'dcp'). DCPDehaze
+is the historical learned/bounded recovery extension; its
+parameter names and forward calculation are preserved for old checkpoints.
 
 Forward signature:
     forward(x) -> (out, residual, color_gain, sides)
@@ -25,9 +23,6 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-ARCH_VERSION = "dcp_core_highpass_refine_v2"
 
 
 def _rgb2gray(x: torch.Tensor) -> torch.Tensor:
@@ -113,6 +108,40 @@ def _guided_filter(guidance: torch.Tensor, src: torch.Tensor, radius: int = 15, 
     mean_a = _local_mean(a, radius)
     mean_b = _local_mean(b, radius)
     return mean_a * guidance + mean_b
+
+
+class ClassicalDCP(nn.Module):
+    """Dark-channel recovery with optional guided transmission refinement.
+
+    Atmospheric light is the brightest RGB pixel among the top dark-channel
+    candidates. No learned correction, logit bounding, blending or sharpening.
+    """
+    def __init__(self, in_ch=3, patch_size=15, omega=.95, t0=.1,
+                 top_percent=.001, guided=True, guided_radius=7, guided_eps=1e-4):
+        super().__init__()
+        if in_ch != 3 or not 0 < t0 <= 1 or not 0 < top_percent <= 1 or not 0 <= omega <= 1:
+            raise ValueError("DCP requires RGB, 0 < t0/top_percent <= 1 and 0 <= omega <= 1")
+        self.patch_size, self.omega, self.t0 = patch_size, omega, t0
+        self.top_percent, self.guided = top_percent, guided
+        self.guided_radius, self.guided_eps = guided_radius, guided_eps
+
+    def forward(self, x):
+        if x.ndim != 4 or x.shape[1] != 3:
+            raise ValueError("DCP expects BCHW RGB input")
+        with torch.amp.autocast(device_type=x.device.type, enabled=False):
+            source = x.float().clamp(0, 1)
+            dark = _dark_channel(source, self.patch_size)
+            # bright_percent=0 chooses exactly one brightest candidate.
+            atmosphere = _estimate_atmospheric_light(source, dark, self.top_percent, 0.)
+            transmission = 1 - self.omega * _dark_channel(source / atmosphere, self.patch_size)
+            if self.guided:
+                transmission = _guided_filter(_rgb2gray(source), transmission,
+                                              self.guided_radius, self.guided_eps)
+            transmission = transmission.clamp(0, 1)
+            restored = ((source - atmosphere) / transmission.clamp_min(self.t0) + atmosphere).clamp(0, 1)
+        gain = source.new_ones((source.shape[0], 3, 1, 1))
+        return restored.to(x.dtype), (restored-source).to(x.dtype), gain.to(x.dtype), [
+            transmission.expand_as(source), dark.expand_as(source), atmosphere.expand_as(source)]
 
 
 class ResidualRefineNet(nn.Module):
@@ -216,7 +245,7 @@ class DCPDehaze(nn.Module):
             if self.use_learned_refine else None
         )
         print(
-            f"[DCPDehaze] {ARCH_VERSION} patch={self.patch_size} omega={self.omega:.2f} "
+            f"[DCPDehaze] patch={self.patch_size} omega={self.omega:.2f} "
             f"guided={self.guided} radius={self.guided_radius} refine={self.use_learned_refine} "
             f"detail={self.detail_preserve_scale:.2f} sharp={self.final_sharp_scale:.2f}"
         )

@@ -7,7 +7,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ..data.datasets import make_dataset, split_ids
+from ..data.datasets import make_dataset
+from ..data.splits import training_split
 from ..losses import VGGPerceptualLoss, dehaze_losses, segmentation_losses
 from ..metrics import (AverageMeter, batch_psnr, batch_ssim, saturation_map,
                        chromaticity_ratio_error, confusion_matrix, segmentation_metrics)
@@ -126,6 +127,8 @@ def stage_schedule(args, strategy="full_staged"):
 
 def run_training(args, experiment=None, experiment_name=None):
     args = deepcopy(args)
+    if args.model == "dcp":
+        raise ValueError("Classical dcp has no trainable parameters. Use predict/evaluate --model dcp without --checkpoint.")
     experiment = experiment or {}
     set_seed(args.seed)
     device = select_device(args.device)
@@ -151,9 +154,16 @@ def run_training(args, experiment=None, experiment_name=None):
     ds_kwargs = dict(name=args.dataset, root=args.data_root, resize=tuple(args.resize),
                      num_classes=args.num_classes, train_repeats=args.train_repeats)
     full = make_dataset(**ds_kwargs)
-    train_ids, val_ids = split_ids(full.ids, args.val_ratio, args.seed)
+    val_kwargs = dict(ds_kwargs, root=args.val_root or args.data_root)
+    val_full = make_dataset(**val_kwargs) if args.val_root else None
+    data_split = training_split(args.dataset, args.data_root, full.ids, args.val_ratio, args.seed,
+                                args.val_root, val_full.ids if val_full is not None else None, args.split_unit)
+    if data_split["shared_clear_references"]:
+        print(f"Warning: validation shares clear references with training: {data_split['shared_clear_references']}. "
+              "Use --split-unit scene for independent reference groups; sample splits are historical diagnostics.")
+    train_ids, val_ids = data_split["train"], data_split["val"]
     train_ds = make_dataset(**ds_kwargs, ids=train_ids, augment=experiment.get("augment", not args.no_augment))
-    val_ds = make_dataset(**ds_kwargs, ids=val_ids, augment=False)
+    val_ds = make_dataset(**val_kwargs, ids=val_ids, augment=False)
     loader_options = dict(batch_size=args.batch_size, num_workers=args.workers, pin_memory=device.type == "cuda")
     train_loader = DataLoader(train_ds, shuffle=True, **loader_options)
     val_loader = DataLoader(val_ds, shuffle=False, **loader_options)
@@ -162,9 +172,9 @@ def run_training(args, experiment=None, experiment_name=None):
     perceptual = VGGPerceptualLoss(device) if needs_dehaze and args.lam_perc > 0 else None
     scaler = torch.amp.GradScaler("cuda") if args.amp and device.type == "cuda" else None
     ensure_dir(save_dir)
-    write_json(save_dir / "split.json", dict(seed=args.seed, dataset=args.dataset, train=train_ids, val=val_ids))
+    write_json(save_dir / "split.json", data_split)
     write_json(save_dir / "config.json", dict(model_config=config, train_config=vars(args), experiment=experiment))
-    print(f"Device: {device}; samples: {len(full)} (train {len(train_ids)}, validation {len(val_ids)})")
+    print(f"Device: {device}; train {len(train_ids)}, validation {len(val_ids)}; split: {data_split['grouping']}")
     rows, final_stats = [], {}
     for stage, epochs in stages:
         configure_stage(model, stage)
@@ -193,13 +203,13 @@ def run_training(args, experiment=None, experiment_name=None):
             rows.append(row)
             write_csv(save_dir / "metrics.csv", rows)
             save_args = (model, config, vars(args), stage, epoch, final_stats, optimizer, scheduler, scaler)
-            save_checkpoint(save_dir / stage / "last.pth", *save_args)
+            save_checkpoint(save_dir / stage / "last.pth", *save_args, data_split=data_split)
             if improved:
-                save_checkpoint(save_dir / stage / "best.pth", *save_args)
+                save_checkpoint(save_dir / stage / "best.pth", *save_args, data_split=data_split)
             if stage == stages[-1][0]:
-                save_checkpoint(save_dir / "last.pth", *save_args)
+                save_checkpoint(save_dir / "last.pth", *save_args, data_split=data_split)
                 if improved:
-                    save_checkpoint(save_dir / "best.pth", *save_args)
+                    save_checkpoint(save_dir / "best.pth", *save_args, data_split=data_split)
             print(f"[{stage} {epoch}/{epochs}] loss={train_stats['total']:.5f} {metric}={score:.5f} ({time.monotonic()-started:.1f}s)")
     write_json(save_dir / "final_metrics.json", final_stats)
     if not args.no_plots:

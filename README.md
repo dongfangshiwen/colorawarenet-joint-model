@@ -155,7 +155,9 @@ datasets/
 
 `--data-root` must contain `hazy/`, `clear/` and `masks/`, with matching file stems such as `001.png`. File extensions may differ. Images are RGB; binary masks use background=0 and road=1, with 0/255 grayscale masks also supported. Masks use nearest-neighbor resizing and share geometric transforms with their images.
 
-Sorted sample IDs are shuffled using Python random seed 42. A validation ratio of 0.15 produces **157 training and 28 validation samples**, with **no independent test split**. Training saves the exact IDs in `split.json`.
+New road experiments group byte-identical clear reference files before splitting, using seed 42 and validation ratio 0.15. The checked 185-sample dataset still yields **157 training and 28 validation samples**, with **no independent test split**. Whole groups are kept together; on other datasets the actual count may differ. Training saves the exact IDs, grouping and hashes in `split.json` and the checkpoint.
+
+The local data contains five duplicate-reference pairs: `058/114`, `062/130`, `063/140`, `177/179`, `181/182`. The historical sample-ID split placed `114` and `181` across the training/validation boundary from their paired reference. The corrected scene split changes the sample membership, so it requires new training and must not be claimed to reproduce the original split or scores. `--split-unit sample` retains the old ID-based split for historical investigation and records its reference overlap. Existing weights retain their saved split; do not evaluate old weights on a newly generated split and assume independence.
 
 ### Benchmark datasets
 
@@ -207,12 +209,12 @@ These are the original figures embedded in the supplied manuscript. Click either
 | :--- | :--- |
 | `coloraware` | **ColorAwareUNet**, the paper's main dehazer |
 | `c2pnet` | C2PNet implementation in this repository |
-| `dcp` | DCP with trainable refinement enabled by default |
+| `dcp` | Parameter-free dark-channel prior with guided transmission refinement; no training or checkpoint required |
 | `ffanet` | FFA-Net implementation in this repository |
 | `grid` | GridDehazeNet implementation in this repository |
 | `psd` | PSDDehazeNet implementation in this repository |
 
-All road experiments use **LiteAttentionUNet** for segmentation. Section 4.1.5 of the manuscript evaluates different dehazers using **one shared, frozen LiteAttentionUNet checkpoint**, without method-specific segmentation fine-tuning. The baselines retain this repository's existing implementations and parameters; equivalence to the original authors' code, weights or scores is not claimed. The DCP configuration includes learned refinement and should not be reported as pure classical DCP.
+All road experiments use **LiteAttentionUNet** for segmentation. Section 4.1.5 of the manuscript evaluates different dehazers using **one shared, frozen LiteAttentionUNet checkpoint**, without method-specific segmentation fine-tuning. Use `--segmenter-checkpoint` for this protocol. Neural baselines retain this repository's implementations; equivalence to the original authors' code, weights or scores is not claimed. The public name is always `dcp`: checkpoint-free inference uses classical recovery; historical DCP checkpoints reconstruct their original enhanced implementation and are identified as `historical-enhanced` in results.
 
 ### Paper configuration
 
@@ -290,24 +292,26 @@ python train.py --data-root datasets --device cpu --resize 64 64 --batch-size 2 
 
 ### Baselines
 
-Change `--model` to select a retained dehazing baseline for an optional joint-training experiment:
+Train a neural dehazing baseline on the same road split, then evaluate it with the shared frozen segmenter:
 
 ```bash
-python train.py --dataset paired-road --data-root datasets --model c2pnet --output runs/comparison --device cuda --amp
+python train.py --dataset paired-road --data-root datasets --model c2pnet --pretrain-seg-epochs 0 --finetune-epochs 0 --output runs/comparison --device cuda --amp
 ```
 
-This command trains a separate segmenter for the run. For the manuscript's downstream comparison, every dehazer must instead be evaluated with the same frozen segmenter described in Section 4.1.5; the independent joint-training results are a separate experiment.
+This command updates only the dehazer. Its checkpoint's untrained segmenter must be replaced using `--segmenter-checkpoint` in the comparison below. Omitting the two zero-epoch options enables a separate joint-training experiment. Classical `dcp` runs directly through `predict` or `evaluate`; `train --model dcp` reports that it has no trainable parameters.
 
 <details>
 <summary><strong>SOTS and augmented HSTS commands</strong></summary>
 
 ```bash
-python train.py --dataset sots-indoor --data-root SOTS/indoor --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
-python train.py --dataset sots-outdoor --data-root SOTS/outdoor --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
+python train.py --dataset sots-indoor --data-root datasets/ITS/train --val-root datasets/ITS/val --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
+python train.py --dataset sots-outdoor --data-root datasets/OTS/train --val-root datasets/OTS/val --model coloraware --resize 512 512 --batch-size 2 --lr 1e-4 --output runs/sots --device cuda --amp
 python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/hsts --device cuda --amp
 ```
 
-Benchmark training runs only `--pretrain-dehaze-epochs`, with restoration supervision. The examples use the paper's 512×512 input size and 1e-4 learning rate, with the repository's default batch size 2 and 60 restoration epochs. HSTS uses paired augmentation; `--train-repeats 4` is an example repeat setting and is configurable.
+Prepare independent ITS/OTS training and validation directories with `hazy/` and `clear/` or `gt/`; these paths are layout examples, not supplied official splits. Keep SOTS test data in `SOTS/indoor` and `SOTS/outdoor`, outside both training and model selection. `--dataset sots-*` selects the pairing adapter, not permission to train on SOTS test images. Without `--val-root`, SOTS-style data is split by the SHA-256 of each paired clear reference, keeping all haze variants of a scene together. The validation fraction then applies to scene groups.
+
+Benchmark training runs only `--pretrain-dehaze-epochs`, with restoration supervision. The examples use 512×512 inputs, learning rate 1e-4, batch size 2 and 60 restoration epochs. The HSTS command is an internal augmented experiment; evaluate its saved validation split, not all of the training directory. `--train-repeats 4` is a configurable example, not an official HSTS protocol.
 
 </details>
 
@@ -318,6 +322,8 @@ Benchmark training runs only `--pretrain-dehaze-epochs`, with restoration superv
 | `--pretrain-dehaze-epochs`, `--pretrain-seg-epochs`, `--finetune-epochs` | Stage lengths: 60 / 20 / 20 |
 | `--resize H W`, `--batch-size` | Input size and batch size: 512 512 / 2 |
 | `--seed`, `--val-ratio` | Split seed and validation fraction: 42 / 0.15 |
+| `--val-root` | Independent validation directory; all training-root samples are used for training |
+| `--split-unit` | Default: `scene` for roads/SOTS, `sample` for HSTS; `sample` selects historical ID-based splitting |
 | `--device`, `--amp` | `auto`, `cpu` or `cuda`; opt-in CUDA mixed precision |
 | `--workers`, `--threads` | Loader workers: 0; CPU threads: 4 |
 | `--use-se`, `--no-attention`, `--no-imagenet-norm` | Change the segmenter's default configuration |
@@ -328,7 +334,7 @@ Benchmark training runs only `--pretrain-dehaze-epochs`, with restoration superv
 ```text
 runs/paper/paired-road/coloraware/
 ├── config.json           # Full model, training and experiment configuration
-├── split.json            # Actual train/validation sample IDs
+├── split.json            # IDs, roots, grouping rule and clear-reference hashes
 ├── metrics.csv
 ├── final_metrics.json    # Validation metrics for the last model
 ├── dehaze/{best,last}.pth
@@ -352,7 +358,7 @@ python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best
 python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best.pth --input datasets/hazy --output results/batch
 ```
 
-Joint prediction saves restored images, class-index PNG masks, overlays and comparison strips. Restoration-only weights do not produce segmentation. Images are internally padded to a multiple of 16; outputs retain the original resolution. Optional `--resize H W` reduces inference cost, with outputs resized back afterwards.
+Joint prediction saves restored images, class-index PNG masks, overlays and comparison strips. Restoration-only weights produce segmentation when `--segmenter-checkpoint` is supplied. Neural inputs are internally padded to a multiple of 16; classical DCP uses the unpadded image. Outputs retain the original resolution. Optional `--resize H W` reduces inference cost, with outputs resized back afterwards.
 
 ### Evaluation
 
@@ -371,25 +377,34 @@ python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/bes
 python -m dehaze_seg evaluate --checkpoint runs/sots/sots-indoor/coloraware/best.pth --dataset sots-indoor --data-root SOTS/indoor --split all --output results/sots-eval
 ```
 
-Evaluation defaults to `val` for paired roads and `all` for benchmarks. Use `--split-file` to select a saved split. When a historical checkpoint lacks a manifest, the split is reconstructed from its seed and ratio; this requires the same dataset contents. Internal SOTS splits use hazy-image IDs rather than scene groups and must not be described as independent standard test results.
+Evaluation defaults to the saved validation split on a known training/validation root, and to `all` for independent benchmark roots. Road evaluation defaults to `val`. Use `--split-file` for a portable explicit split; with a shared segmenter its manifest supplies the default selection. All compared models use the same ordered sample list. A checkpoint trained with `--val-root` directs validation to that directory.
+
+Known overlap with the training samples of either the dehazer or the shared segmenter is rejected, including copied clear files with matching hashes. `--allow-training-overlap` permits an explicitly labelled diagnostic and records overlap in the results. These checks cannot certify unknown training history or detect every transformed/re-encoded copy. Historical weights without a manifest reconstruct a requested split from seed/ratio and require unchanged data contents; they do not establish an independent test set.
 
 `--metric-align crop` center-crops mismatched predictions and references to their common size; `resize` resizes the reference; `none` requires equal dimensions. Training uses its configured resize, while evaluation defaults to native resolution, so their results can differ.
 
-Per-image results are saved in `metrics.csv`, with aggregate results in `summary.json`. Restoration metrics are averaged per image; segmentation metrics use the full confusion matrix. Validation PSNR now uses per-image averaging rather than the historical batch-aggregated MSE, making the aggregate independent of validation batch size. `--save-images` exports evaluation images; `--limit 1` processes one sample.
+Per-image results are saved in `metrics.csv`, aggregates in `summary.json`, and sample IDs, model configuration, references and shared-segmenter provenance in `protocol.json`. Restoration metrics are averaged per image; segmentation metrics use the full confusion matrix. Validation PSNR uses per-image averaging. `--save-images` exports evaluation images; `--limit 1` processes one sample.
 
 ### Compare checkpoints
 
-Compare multiple checkpoints in one run:
+Compare dehazers under the shared frozen-segmenter protocol of Section 4.1.5:
 
 ```bash
-python -m dehaze_seg predict --checkpoint runs/paper/paired-road/coloraware/best.pth runs/comparison/paired-road/c2pnet/best.pth --input datasets/hazy --limit 5 --output results/comparison
+python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/best.pth runs/comparison/paired-road/c2pnet/best.pth --include-dcp --segmenter-checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --save-images --output results/comparison
 ```
 
-This writes separate model outputs, a summary comparison table and image grids. Each joint checkpoint uses its own saved segmenter; this command does not replace them with the shared frozen segmenter required by the paper's downstream comparison protocol.
+The segmenter is loaded once, frozen and kept in evaluation mode. Its saved normalization is applied to every dehazer, including restoration-only weights and classical DCP. Its path and SHA-256 are saved with the results. Per-method segmenters are replaced. Omitting this option uses each checkpoint's own segmenter, which is a different protocol. Select the shared checkpoint before comparing methods; do not select it on test results. Historical shared weights accept `--segmenter-model`, `--segmenter-legacy-profile` and `--segmenter-model-config` when needed.
+
+Classical DCP can also run on its own, using the same public model name:
+
+```bash
+python -m dehaze_seg predict --model dcp --input datasets/hazy/001.png --output results/dcp
+python -m dehaze_seg evaluate --model dcp --segmenter-checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --output results/dcp-eval
+```
 
 ## Checkpoints
 
-New checkpoints store complete `model_config` metadata. The loader also supports historical `model_state`, `model_state_dict`, `state_dict` and `dehazer_state` containers and common wrapper prefixes. Recognized historical training `args` are translated into the corresponding configuration.
+New checkpoints store complete `model_config`, training configuration and the actual data split, including roots and clear-reference hashes. The loader also supports historical `model_state`, `model_state_dict`, `state_dict` and `dehazer_state` containers and common wrapper prefixes. Recognized historical training `args` are translated into the corresponding configuration. Historical `gain_local` weights retain their original lower bound; corrected defaults apply to new experiments.
 
 ```bash
 python -m dehaze_seg predict --checkpoint weights/colorawareunet.pth --input datasets/hazy/001.png --resize 512 512 --output results/legacy
@@ -418,6 +433,19 @@ python -m dehaze_seg ablate --data-root datasets --experiments attention_none,at
 </details>
 
 Additional registered experiments cover training strategy, loss, capacity, augmentation, normalization and segmentation directly from haze. `--experiments all` runs the full registry. Experiments share the trainer, split and metrics; outputs are grouped by experiment name with `ablation_summary.csv`.
+
+### Reproduction notes
+
+| Setting | Current implementation and scope |
+| :--- | :--- |
+| Table 4 local gain | `gain_local`: local tanh, scale 0.30, **no lower clamp** (`gain_min=None`) |
+| Table 4 amplify-only gain | Keeps `1 + 0.30 × tanh(ReLU(raw))`; final gain weights start at zero and bias at **0.001**, allowing gradients through ReLU. The main tanh model retains zero initialization. |
+| Historical amplify-only runs | All-zero initialization made the gain head inactive. Loading preserves the saved weights; correcting the experiment requires retraining. The manuscript's blanket zero-initialization statement needs this exception. |
+| Weak / strong gain | Repository settings are `(scale, min)=(0.10, 0.98)` / `(0.50, 0.90)`; the manuscript does not specify these exact values. Local smoothing uses kernel 15. |
+| Table 6 attention / SE | The four combinations are registered. The table's 5.878 / 5.944 / 6.097 / 6.164 M values match **joint-model** parameter counts, not the segmenter alone. The current runner uses the full staged schedule for each variant. |
+| Ablation summary | `ablation_summary.csv` reports final-epoch validation metrics, not a re-evaluation of `best.pth`. Each stage continues from the preceding stage's last weights. |
+
+The manuscript does not fully specify the attention experiment's training budget and frozen branches, or all model-selection settings. Confirm these against the original logs before claiming numerical reproduction. The trainer records active losses at each stage; it does not record the inactive restoration training loss during segmentation-only training, so its CSV alone cannot fully redraw Figure 6(a). CPU regression checks cover the corrected workflows; CUDA runs, full training and the paper's reported scores have not been revalidated.
 
 ### Visualization
 
@@ -455,7 +483,7 @@ The package provides `train`, `predict`, `evaluate`, `ablate` and `visualize` th
 python -m unittest discover -s tests -v
 ```
 
-**11 CPU regression tests passed** in the local environment listed under [installation](#installation). Tests cover model forwards, gain/attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates and checkpoint round trips, without downloading datasets or VGG weights.
+**19 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation and classical DCP. They do not download datasets or VGG weights.
 
 Additional local checks verified the 185 road triplets, a small three-stage training run, prediction/evaluation/ablation/visualization workflows, and inference with an existing historical checkpoint. **CUDA execution and full paper training were not validated.** No reproduction scores are claimed here.
 

@@ -119,7 +119,8 @@ class ColorAwareUNet(nn.Module):
         gain_smooth_kernel=15, # smooth local gain so it handles illumination, not texture
         norm='inst',
         output_clamp=True,
-        refine_scale=0.25
+        refine_scale=0.25,
+        amp_init_bias=1e-3
     ):
         super().__init__()
         assert gain_form in ['tanh', 'amp'], "gain_form must be 'tanh' or 'amp'"
@@ -136,6 +137,10 @@ class ColorAwareUNet(nn.Module):
         self.norm = norm
         self.output_clamp = bool(output_clamp)
         self.refine_scale = float(refine_scale)
+        # ReLU'(0) is zero: an all-zero amplify-only head never learns.
+        # Keep the paper forward equation and start this variant just above zero.
+        self.amp_init_bias = float(amp_init_bias)
+        gain_bias = self.amp_init_bias if gain_form == 'amp' else 0.0
 
         # Encoder
         self.enc1 = DownBlock(in_ch, base_ch, norm=norm)
@@ -215,12 +220,12 @@ class ColorAwareUNet(nn.Module):
             if isinstance(last_gain, nn.Conv2d):
                 nn.init.constant_(last_gain.weight, 0.0)
                 if last_gain.bias is not None:
-                    nn.init.constant_(last_gain.bias, 0.0)
+                    nn.init.constant_(last_gain.bias, gain_bias)
             last_local_gain = self.local_gain_head[-1]
             if isinstance(last_local_gain, nn.Conv2d):
                 nn.init.constant_(last_local_gain.weight, 0.0)
                 if last_local_gain.bias is not None:
-                    nn.init.constant_(last_local_gain.bias, 0.0)
+                    nn.init.constant_(last_local_gain.bias, gain_bias)
         except Exception:
             pass
 
