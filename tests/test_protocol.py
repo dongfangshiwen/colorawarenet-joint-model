@@ -17,7 +17,7 @@ from dehaze_seg.data.datasets import make_dataset
 from dehaze_seg.data.splits import training_split, training_overlap
 from dehaze_seg.engine.checkpoint import load_checkpoint, save_checkpoint, historical_config
 from dehaze_seg.engine.inference import infer_image, run_inference, select_split, use_shared_segmenter
-from dehaze_seg.engine.train import configure_stage, run_training, stage_schedule
+from dehaze_seg.engine.train import configure_stage, run_training, stage_schedule, train_epoch
 from dehaze_seg.experiments.ablations import EXPERIMENTS
 from dehaze_seg.models.DCP import ClassicalDCP, DCPDehaze
 from dehaze_seg.models.registry import build_model, model_config, constructor_defaults
@@ -92,21 +92,21 @@ class ProtocolTests(unittest.TestCase):
 
     def test_dcp_segmentation_training_and_roundtrip(self):
         parser = build_parser()
-        defaults = parser.parse_args(["train", "--model", "dcp"])
+        defaults = parser.parse_args(["train", "--model", "dcp", "--dcp-mode", "classical"])
         self.assertEqual(stage_schedule(defaults), [("seg", 40)])
         for dataset in ("sots-indoor", "sots-outdoor", "hsts"):
-            unlabelled = parser.parse_args(["train", "--model", "dcp", "--dataset", dataset,
+            unlabelled = parser.parse_args(["train", "--model", "dcp", "--dcp-mode", "classical", "--dataset", dataset,
                                            "--data-root", "nonexistent"])
             with self.assertRaisesRegex(ValueError, "requires --dataset paired-road"):
                 run_training(unlabelled)
-        empty = parser.parse_args(["train", "--model", "dcp", "--pretrain-seg-epochs", "0",
+        empty = parser.parse_args(["train", "--model", "dcp", "--dcp-mode", "classical", "--pretrain-seg-epochs", "0",
                                    "--finetune-epochs", "0", "--data-root", "nonexistent"])
         with self.assertRaisesRegex(ValueError, "finetune-epochs > 0"):
             run_training(empty)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             road_data(root / "data")
-            args = parser.parse_args(["train", "--model", "dcp", "--data-root", str(root / "data"),
+            args = parser.parse_args(["train", "--model", "dcp", "--dcp-mode", "classical", "--data-root", str(root / "data"),
                 "--output", str(root / "runs"), "--resize", "32", "32", "--seg-base-ch", "8",
                 "--pretrain-seg-epochs", "1", "--finetune-epochs", "1", "--no-plots", "--device", "cpu"])
             config = model_config("dcp", joint=True)
@@ -147,6 +147,92 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual((result["model"], result["implementation"], result["segmentation"]),
                              ("dcp", "classical", "checkpoint"))
             self.assertTrue((root / "predict/masks/000.png").is_file())
+
+    def test_learned_dcp_three_stages_and_segmentation_gradient(self):
+        torch.manual_seed(42)
+        parser = build_parser()
+        defaults = parser.parse_args(["train", "--model", "dcp"])
+        self.assertEqual(defaults.dcp_mode, "learned")
+        self.assertEqual(stage_schedule(defaults), [("dehaze", 60), ("seg", 20), ("joint", 20)])
+        config = model_config("dcp", joint=True, dcp_mode="learned")
+        config["segmenter"]["base_ch"] = 8
+        model = build_model(config)
+        self.assertIsInstance(model.dehazer, DCPDehaze)
+        self.assertGreater(sum(p.numel() for p in model.dehazer.parameters()), 0)
+        probe = torch.rand(2, 3, 32, 32)
+        configure_stage(model, "joint")
+        _, logits, _ = model(probe)
+        # Isolate segmentation supervision: its gradient must reach restoration.
+        loss = torch.nn.functional.cross_entropy(logits, torch.randint(0, 2, (2, 32, 32)))
+        loss.backward()
+        gradient = model.dehazer.refine_net.conv3.weight.grad
+        self.assertTrue(torch.isfinite(gradient).all())
+        self.assertGreater(gradient.abs().sum().item(), 0.)
+        model.zero_grad(set_to_none=True)
+        stages = []
+
+        def checked_epoch(*args, **kwargs):
+            current, stage = args[0], args[5]
+            before = {k: v.clone() for k, v in current.state_dict().items()}
+            stats = train_epoch(*args, **kwargs)
+            changed = {k for k, v in current.state_dict().items() if not torch.equal(v, before[k])}
+            self.assertEqual(any(k.startswith("dehazer.") for k in changed), stage != "seg")
+            self.assertEqual(any(k.startswith("segmenter.") for k in changed), stage != "dehaze")
+            self.assertEqual("dehaze" in stats, stage != "seg")
+            self.assertEqual("seg" in stats, stage != "dehaze")
+            self.assertTrue(np.isfinite(stats["total"]))
+            stages.append(stage)
+            return stats
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            road_data(root / "data")
+            args = parser.parse_args(["train", "--model", "dcp", "--data-root", str(root / "data"),
+                "--output", str(root / "runs"), "--resize", "32", "32", "--seg-base-ch", "8",
+                "--pretrain-dehaze-epochs", "1", "--pretrain-seg-epochs", "1", "--finetune-epochs", "1",
+                "--lam-perc", "0", "--no-plots", "--device", "cpu"])
+            with patch("dehaze_seg.engine.train.build_model", return_value=model), \
+                 patch("dehaze_seg.engine.train.train_epoch", side_effect=checked_epoch):
+                run_training(args)
+            self.assertEqual(stages, ["dehaze", "seg", "joint"])
+            output = root / "runs/paired-road/dcp"
+            for stage in stages:
+                self.assertTrue((output / stage / "best.pth").is_file())
+            loaded, loaded_config, checkpoint = load_checkpoint(output / "last.pth")
+            self.assertEqual(loaded_config, config)
+            self.assertEqual(checkpoint["train_config"]["training_protocol"], "learned-dcp-joint")
+            self.assertEqual(checkpoint["stage"], "joint")
+            with torch.no_grad():
+                for expected, actual in zip(model(probe)[:2], loaded(probe)[:2]):
+                    torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+            infer_args = parser.parse_args(["predict", "--checkpoint", str(output / "best.pth"),
+                "--input", str(root / "data/hazy/000.png"), "--output", str(root / "predict"), "--device", "cpu"])
+            result = run_inference(infer_args)[0]
+            self.assertEqual(result["implementation"], "learned-refinement")
+            self.assertTrue((root / "predict/masks/000.png").is_file())
+
+    def test_learned_dcp_restoration_without_masks(self):
+        parser = build_parser()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "data/hazy").mkdir(parents=True)
+            (root / "data/clear").mkdir()
+            rng = np.random.default_rng(42)
+            for i in range(3):
+                clear = rng.integers(0, 180, (32, 32, 3), dtype=np.uint8)
+                Image.fromarray(clear).save(root / "data/clear" / f"{i}.png")
+                Image.fromarray(clear + 40).save(root / "data/hazy" / f"{i}_1.png")
+            args = parser.parse_args(["train", "--model", "dcp", "--dataset", "sots-indoor",
+                "--data-root", str(root / "data"), "--output", str(root / "runs"), "--resize", "32", "32",
+                "--pretrain-dehaze-epochs", "1", "--lam-perc", "0", "--no-plots", "--device", "cpu"])
+            self.assertEqual(stage_schedule(args), [("dehaze", 1)])
+            stats = run_training(args)
+            self.assertNotIn("miou", stats)
+            loaded, config, checkpoint = load_checkpoint(root / "runs/sots-indoor/dcp/last.pth")
+            self.assertIsInstance(loaded, DCPDehaze)
+            self.assertFalse(config["joint"])
+            self.assertEqual(checkpoint["train_config"]["training_protocol"], "learned-dcp-restoration")
+            self.assertEqual(checkpoint["stage"], "dehaze")
 
     def test_historical_dcp_roundtrip_keeps_one_public_name(self):
         config = model_config("dcp", joint=False)

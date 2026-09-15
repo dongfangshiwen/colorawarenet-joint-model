@@ -226,6 +226,7 @@ def run_inference(args, evaluate=False):
         if len(sources) > 1:
             folder /= f"{index+1:02d}_{config['model']}_{Path(checkpoint_path).stem if checkpoint_path else 'classical'}"
         implementation = ("historical-enhanced" if config.get("dehazer_type") == "legacy-dcp"
+                          else "learned-refinement" if config.get("dehazer_type") == "learned-dcp"
                           else "classical" if config["model"] == "dcp" else "network")
         protocol = dict(samples=[p.stem for p in images], model_config=config,
                         shared_segmenter=shared_info,
@@ -283,7 +284,8 @@ def run_inference(args, evaluate=False):
         write_csv(folder / "metrics.csv", rows)
         write_json(folder / "summary.json", summary)
         summaries.append(summary)
-        output_folders.append((config["model"], folder, images))
+        label = f"dcp ({implementation})" if config["model"] == "dcp" else config["model"]
+        output_folders.append((label, folder, images))
         print(json.dumps(summary, ensure_ascii=False))
         del model
     if len(summaries) > 1:

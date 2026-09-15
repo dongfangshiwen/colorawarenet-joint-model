@@ -209,12 +209,12 @@ These are the original figures embedded in the supplied manuscript. Click either
 | :--- | :--- |
 | `coloraware` | **ColorAwareUNet**, the paper's main dehazer |
 | `c2pnet` | C2PNet implementation in this repository |
-| `dcp` | Fixed dark-channel prior with guided transmission refinement; optionally train its downstream LiteAttentionUNet on road masks |
+| `dcp` | Trainable DCP recovery/refinement + LiteAttentionUNet for joint training; classical DCP remains available for checkpoint-free inference |
 | `ffanet` | FFA-Net implementation in this repository |
 | `grid` | GridDehazeNet implementation in this repository |
 | `psd` | PSDDehazeNet implementation in this repository |
 
-All road experiments use **LiteAttentionUNet** for segmentation. Section 4.1.5 of the manuscript evaluates different dehazers using **one shared, frozen LiteAttentionUNet checkpoint**, without method-specific segmentation fine-tuning. Use `--segmenter-checkpoint` for this protocol. Neural baselines retain this repository's implementations; equivalence to the original authors' code, weights or scores is not claimed. The public name is always `dcp`: checkpoint-free inference uses classical recovery; historical DCP checkpoints reconstruct their original enhanced implementation and are identified as `historical-enhanced` in results.
+All road experiments use **LiteAttentionUNet** for segmentation. Section 4.1.5 of the manuscript evaluates different dehazers using **one shared, frozen LiteAttentionUNet checkpoint**, without method-specific segmentation fine-tuning. Use `--segmenter-checkpoint` for this protocol. Neural baselines retain this repository's implementations; equivalence to the original authors' code, weights or scores is not claimed. The public name is always `dcp`: training defaults to a learned refinement extension, checkpoint-free inference uses classical recovery, and historical checkpoints retain their original implementation. Results distinguish `learned-refinement`, `classical` and `historical-enhanced`. Report the trainable extension as a learned DCP variant when using it in the paper.
 
 ### Paper configuration
 
@@ -300,24 +300,38 @@ python train.py --dataset paired-road --data-root datasets --model c2pnet --pret
 
 This command updates only the dehazer. Its checkpoint's untrained segmenter must be replaced using `--segmenter-checkpoint` in the comparison below. Omitting the two zero-epoch options enables a separate joint-training experiment.
 
-### Train segmentation after DCP
+### Joint DCP dehazing and segmentation training
 
-`train.py --model dcp` keeps classical DCP fixed and trains **LiteAttentionUNet** from its restored images. It requires the labelled `paired-road` dataset with `hazy/`, `clear/` and `masks/`:
-
-```bash
-python train.py --model dcp --dataset paired-road --data-root datasets --output runs/dcp-seg --device cuda --amp
-```
-
-The default is one **40-epoch segmentation stage**: `--pretrain-seg-epochs 20` plus `--finetune-epochs 20`. To train for a different total, set these options explicitly, for example `--pretrain-seg-epochs 40 --finetune-epochs 0`. `--pretrain-dehaze-epochs` is unused for DCP. Only CE + Dice updates the segmenter; DCP predictions stay fixed, no joint optimization is run, and VGG weights are not needed. SOTS and HSTS have no segmentation masks, so use `evaluate --model dcp` for those datasets.
-
-Weights are saved under `runs/dcp-seg/paired-road/dcp/`, with `best.pth`, `last.pth` and `seg/{best,last}.pth`. The best model is selected by validation mIoU. Configuration files and checkpoints record `fixed-dcp-segmentation` and the effective epoch schedule.
+`train.py --model dcp` now trains both the **dehazing refinement** and **LiteAttentionUNet** on `paired-road` triplets (`hazy/`, `clear/`, `masks/`). The default `--dcp-mode learned` uses the repository's analytic DCP recovery with bounded restoration, a learned detail-refinement head and detail/sharpening processing. The analytic prior has no learned parameters; the refinement head has 22,563 trainable parameters and is part of the dehazing branch.
 
 ```bash
-python -m dehaze_seg predict --checkpoint runs/dcp-seg/paired-road/dcp/best.pth --input datasets/hazy/001.png --output results/dcp-seg-predict
-python -m dehaze_seg evaluate --checkpoint runs/dcp-seg/paired-road/dcp/best.pth --dataset paired-road --data-root datasets --split val --output results/dcp-seg-eval
+python train.py --model dcp --dataset paired-road --data-root datasets --output runs/dcp-joint --device cuda --amp
 ```
 
-This is an additional downstream training experiment. For the manuscript's shared-segmenter comparison, pass the **same** `--segmenter-checkpoint` for every dehazer as shown below; independently trained per-method segmenters define a different experiment.
+| Stage | Default epochs | Updated branch | Objective |
+| :--- | :---: | :--- | :--- |
+| `dehaze` | 60 | DCP learned refinement | L1 + 0.40 × SSIM loss + 0.05 × VGG perceptual loss |
+| `seg` | 20 | LiteAttentionUNet; dehazer frozen | CE + Dice |
+| `joint` | 20 | Both trainable branches | Restoration + segmentation; segmentation gradients reach the dehazer |
+
+The epoch options retain their normal meanings: `--pretrain-dehaze-epochs`, `--pretrain-seg-epochs`, `--finetune-epochs`. VGG weights are required for the default restoration loss. SOTS-style data and HSTS use restoration-only training with `--dcp-mode learned`, without segmentation masks; keep training and test data separate as described below.
+
+Weights are saved under `runs/dcp-joint/paired-road/dcp/`, including `dehaze/`, `seg/`, `joint/` stage checkpoints and top-level `best.pth` / `last.pth`. Model selection uses the same stage-specific scores as the main trainer. The configuration records `dehazer_type=learned-dcp`, the refinement settings and the actual schedule, so loading restores the trainable architecture automatically.
+
+```bash
+python -m dehaze_seg predict --checkpoint runs/dcp-joint/paired-road/dcp/best.pth --input datasets/hazy/001.png --output results/dcp-joint-predict
+python -m dehaze_seg evaluate --checkpoint runs/dcp-joint/paired-road/dcp/best.pth --dataset paired-road --data-root datasets --split val --output results/dcp-joint-eval
+```
+
+The previous frozen-DCP segmentation workflow remains available explicitly:
+
+```bash
+python train.py --model dcp --dcp-mode classical --dataset paired-road --data-root datasets --output runs/dcp-seg --device cuda --amp
+```
+
+In this optional mode only the segmenter trains, for `pretrain-seg-epochs + finetune-epochs` (40 by default); restoration pretraining is unused and VGG is not needed. Old checkpoints from this mode continue to load as fixed classical DCP. New joint runs require a fresh output directory and retraining.
+
+Joint training is an additional learned-DCP experiment. For the manuscript's shared-segmenter comparison, pass the **same** `--segmenter-checkpoint` for every dehazer as shown below; independently trained per-method segmenters define a different experiment.
 
 <details>
 <summary><strong>Neural dehazer training: SOTS-style data and augmented HSTS</strong></summary>
@@ -348,7 +362,7 @@ Benchmark training runs only `--pretrain-dehaze-epochs`, with restoration superv
 | `--use-se`, `--no-attention`, `--no-imagenet-norm` | Change the segmenter's default configuration |
 | `--output` | Parent directory for a new experiment |
 
-For DCP, the two segmentation-related epoch options are summed into a single frozen-dehazer stage, as described above.
+`--dcp-mode learned` is the DCP training default and uses the normal 60 / 20 / 20 schedule on roads. `--dcp-mode classical` selects the optional frozen-dehazer segmentation workflow.
 
 ### Training outputs
 
@@ -504,7 +518,7 @@ The package provides `train`, `predict`, `evaluate`, `ablate` and `visualize` th
 python -m unittest discover -s tests -v
 ```
 
-**20 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation and training segmentation after fixed DCP. They do not download datasets or VGG weights.
+**22 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation, classical DCP segmentation and learned DCP restoration/joint training. The joint DCP test also verifies that segmentation loss reaches the dehazing refinement head. Tests do not download datasets or VGG weights.
 
 Additional local checks verified the 185 road triplets, a small three-stage training run, prediction/evaluation/ablation/visualization workflows, and inference with an existing historical checkpoint. **CUDA execution and full paper training were not validated.** No reproduction scores are claimed here.
 

@@ -218,12 +218,12 @@ datasets/
 |---|---|
 | `coloraware` | 论文主去雾模型 ColorAwareUNet |
 | `c2pnet` | 仓库中的 C2PNet 实现 |
-| `dcp` | 固定暗通道先验，使用引导滤波细化透射率；支持利用道路标注训练后面的 LiteAttentionUNet |
+| `dcp` | 可训练的 DCP 恢复/细化＋LiteAttentionUNet，支持联合训练；保留无需权重的经典 DCP 推理 |
 | `ffanet` | 仓库中的 FFA-Net 实现 |
 | `grid` | 仓库中的 GridDehazeNet 实现 |
 | `psd` | 仓库中的 PSDDehazeNet 实现 |
 
-论文第 4.1.5 节的下游比较要求各去雾方法**共用同一个冻结的 LiteAttentionUNet 权重**，不针对各方法单独微调分割器；通过 `--segmenter-checkpoint` 执行此协议。神经网络对比模型沿用本仓库实现，不宣称与原作者官方代码、权重或结果完全一致。公开名称统一为 `dcp`：不传权重时运行经典恢复公式；加载历史 DCP 权重时恢复原增强实现，结果标记为 `historical-enhanced`。
+论文第 4.1.5 节的下游比较要求各去雾方法**共用同一个冻结的 LiteAttentionUNet 权重**，不针对各方法单独微调分割器；通过 `--segmenter-checkpoint` 执行此协议。神经网络对比模型沿用本仓库实现，不宣称与原作者官方代码、权重或结果完全一致。公开名称统一为 `dcp`：训练默认使用可学习细化扩展，不传权重推理时使用经典恢复，历史权重保持原实现。结果分别标记为 `learned-refinement`、`classical` 和 `historical-enhanced`。论文中应将可训练扩展作为可学习 DCP 变体报告。
 
 ### 论文主配置
 
@@ -312,24 +312,38 @@ python train.py --dataset paired-road --data-root datasets --model c2pnet --pret
 
 该命令只更新去雾器；其权重中未训练的分割器需要在下方比较命令中通过 `--segmenter-checkpoint` 替换。省略两个零轮数选项可开展独立联合训练实验。
 
-### 训练 DCP 后面的分割网络
+### DCP 去雾与分割联合训练
 
-`train.py --model dcp` 固定经典 DCP，利用它的去雾结果训练 **LiteAttentionUNet**。需要带标注的 `paired-road` 数据，即 `hazy/`、`clear/` 和 `masks/`：
-
-```bash
-python train.py --model dcp --dataset paired-road --data-root datasets --output runs/dcp-seg --device cuda --amp
-```
-
-默认只执行一个 **40 轮分割阶段**：`--pretrain-seg-epochs 20` 加上 `--finetune-epochs 20`。可以明确设置总轮数，例如 `--pretrain-seg-epochs 40 --finetune-epochs 0`。DCP 不使用 `--pretrain-dehaze-epochs`；仅由 CE＋Dice 更新分割器，DCP 预测保持固定，不执行联合优化，也不需要 VGG 权重。SOTS 和 HSTS 没有分割标注，应使用 `evaluate --model dcp` 做去雾评估。
-
-权重保存到 `runs/dcp-seg/paired-road/dcp/`，包含 `best.pth`、`last.pth` 和 `seg/{best,last}.pth`，按验证集 mIoU 选择最优模型。配置文件和权重会记录 `fixed-dcp-segmentation` 及实际训练轮数。
+`train.py --model dcp` 现在同时支持训练**去雾细化分支**和 **LiteAttentionUNet**。道路数据仍需 `hazy/`、`clear/`、`masks/` 三元组。默认 `--dcp-mode learned` 使用仓库已有的 DCP 解析恢复、有界恢复、可学习细节细化头及细节/锐化处理。解析先验本身没有学习参数；细化头包含 22,563 个可训练参数，属于去雾分支。
 
 ```bash
-python -m dehaze_seg predict --checkpoint runs/dcp-seg/paired-road/dcp/best.pth --input datasets/hazy/001.png --output results/dcp-seg-predict
-python -m dehaze_seg evaluate --checkpoint runs/dcp-seg/paired-road/dcp/best.pth --dataset paired-road --data-root datasets --split val --output results/dcp-seg-eval
+python train.py --model dcp --dataset paired-road --data-root datasets --output runs/dcp-joint --device cuda --amp
 ```
 
-这是一项额外的下游训练实验。执行论文的共用分割器比较时，仍应按下方命令为所有去雾方法指定**同一个** `--segmenter-checkpoint`；各方法单独训练分割器属于不同实验。
+| 阶段 | 默认轮数 | 更新分支 | 优化目标 |
+| :--- | :---: | :--- | :--- |
+| `dehaze` | 60 | DCP 可学习细化 | L1＋0.40×SSIM loss＋0.05×VGG 感知损失 |
+| `seg` | 20 | LiteAttentionUNet；冻结去雾器 | CE＋Dice |
+| `joint` | 20 | 两个可训练分支 | 去雾＋分割损失；分割梯度可传回去雾器 |
+
+三个轮数参数恢复正常含义：`--pretrain-dehaze-epochs`、`--pretrain-seg-epochs`、`--finetune-epochs`。默认去雾损失需要 VGG 权重。SOTS 格式数据和 HSTS 在 `--dcp-mode learned` 下只训练去雾分支，无需分割标注；训练与测试目录仍需按下方说明隔离。
+
+权重保存到 `runs/dcp-joint/paired-road/dcp/`，包含 `dehaze/`、`seg/`、`joint/` 三个阶段以及根目录的 `best.pth`、`last.pth`。各阶段按主训练器对应指标选择最优模型。配置中记录 `dehazer_type=learned-dcp`、细化参数及实际阶段安排，加载权重时会自动恢复可训练结构。
+
+```bash
+python -m dehaze_seg predict --checkpoint runs/dcp-joint/paired-road/dcp/best.pth --input datasets/hazy/001.png --output results/dcp-joint-predict
+python -m dehaze_seg evaluate --checkpoint runs/dcp-joint/paired-road/dcp/best.pth --dataset paired-road --data-root datasets --split val --output results/dcp-joint-eval
+```
+
+之前的固定 DCP、只训练分割器模式仍可显式选择：
+
+```bash
+python train.py --model dcp --dcp-mode classical --dataset paired-road --data-root datasets --output runs/dcp-seg --device cuda --amp
+```
+
+此可选模式仅训练分割器，轮数为 `pretrain-seg-epochs + finetune-epochs`（默认 40）；不使用去雾预训练，也无需 VGG。该模式的旧权重仍按固定经典 DCP 加载。新的联合实验应使用新输出目录并重新训练。
+
+联合训练属于额外的可学习 DCP 实验。执行论文的共用分割器比较时，仍应按下方命令为所有去雾方法指定**同一个** `--segmenter-checkpoint`；各方法单独训练分割器属于不同实验。
 
 <details>
 <summary><strong>神经网络去雾训练：SOTS 格式数据与增强 HSTS</strong></summary>
@@ -360,7 +374,7 @@ python train.py --dataset hsts --data-root HSTS --train-repeats 4 --output runs/
 | `--use-se`、`--no-attention`、`--no-imagenet-norm` | 修改分割网络的默认配置 |
 | `--output` | 新实验的输出父目录 |
 
-DCP 会将两个分割相关的轮数选项相加，合并为一个固定去雾器的分割阶段，详见上方说明。
+`--dcp-mode learned` 是 DCP 训练默认值，在道路数据上使用正常的 60 / 20 / 20 安排；`--dcp-mode classical` 则选择可选的固定去雾器、仅训练分割器流程。
 
 ### 训练输出
 
@@ -529,7 +543,7 @@ tests/               # CPU 回归检查
 python -m unittest discover -s tests -v
 ```
 
-在[安装说明](#installation)列出的本机环境中，**20 项 CPU 回归测试通过**，覆盖模型前向、只放大增益的实际学习、attention/SE 变体、数据配对、同步增强、阶段冻结、参数更新、严格权重往返加载、场景隔离、共用冻结分割器，以及固定 DCP 后训练分割网络。测试不会下载数据或 VGG 权重。
+在[安装说明](#installation)列出的本机环境中，**22 项 CPU 回归测试通过**，覆盖模型前向、只放大增益的实际学习、attention/SE 变体、数据配对、同步增强、阶段冻结、参数更新、严格权重往返加载、场景隔离、共用冻结分割器、经典 DCP 分割训练，以及可学习 DCP 去雾/联合训练。联合 DCP 测试还验证了分割损失能够传回去雾细化头。测试不会下载数据或 VGG 权重。
 
 另已检查 185 组道路三元组、小样本三阶段训练、推理/评估/消融/可视化流程，以及现有历史权重的推理。**尚未验证 CUDA 运行与论文完整训练**，这里不提供未经复现的成绩。
 

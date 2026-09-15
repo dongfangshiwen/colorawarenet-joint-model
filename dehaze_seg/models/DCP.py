@@ -10,9 +10,11 @@ This module follows the public DCP pipeline:
 4. edge-aware transmission refinement with guided filter
 5. radiance recovery: J(x) = (I(x) - A) / max(t(x), t0) + A
 
-ClassicalDCP is the parameter-free baseline (registry name 'dcp'). DCPDehaze
-is the historical learned/bounded recovery extension; its
-parameter names and forward calculation are preserved for old checkpoints.
+Both implementations use the public name 'dcp'. ClassicalDCP provides the
+parameter-free baseline for checkpoint-free inference. DCPDehaze provides
+bounded recovery and learned detail refinement for restoration and joint
+training. Its parameter names and forward calculation also support historical
+enhanced checkpoints.
 
 Forward signature:
     forward(x) -> (out, residual, color_gain, sides)

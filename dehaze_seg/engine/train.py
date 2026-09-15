@@ -115,11 +115,11 @@ def validate(model, loader, device):
 
 
 def stage_schedule(args, strategy="full_staged"):
-    if args.model == "dcp":
+    if args.model == "dcp" and args.dcp_mode == "classical":
         if args.dataset != "paired-road":
-            raise ValueError("DCP training requires --dataset paired-road with hazy/, clear/ and masks/: "
-                             "only the downstream segmenter is trainable. For unlabelled benchmarks, "
-                             "use evaluate --model dcp.")
+            raise ValueError("DCP classical training requires --dataset paired-road with hazy/, clear/ and masks/: "
+                             "only the downstream segmenter is trainable. For benchmark restoration training, "
+                             "use --dcp-mode learned; for classical evaluation, use evaluate --model dcp.")
         return [("seg", args.pretrain_seg_epochs + args.finetune_epochs)]
     if args.dataset != "paired-road":
         return [("dehaze", args.pretrain_dehaze_epochs)]
@@ -140,7 +140,7 @@ def run_training(args, experiment=None, experiment_name=None):
     experiment = experiment or {}
     set_seed(args.seed)
     device = select_device(args.device)
-    config = model_config(args.model, joint=args.dataset == "paired-road")
+    config = model_config(args.model, joint=args.dataset == "paired-road", dcp_mode=args.dcp_mode)
     if args.model == "coloraware":
         config["dehazer"]["base_ch"] = args.color_base_ch
     config["segmenter"].update(num_classes=args.num_classes, base_ch=args.seg_base_ch,
@@ -150,16 +150,18 @@ def run_training(args, experiment=None, experiment_name=None):
     config["dehazer"].update(experiment.get("dehazer", {}))
     config["segmenter"].update(experiment.get("segmenter", {}))
     config["imagenet_norm"] = experiment.get("imagenet_norm", config["imagenet_norm"])
-    config["dehazer_type"] = experiment.get("dehazer_type", "network")
+    config["dehazer_type"] = experiment.get("dehazer_type", config["dehazer_type"])
     for key, value in experiment.get("loss", {}).items():
         setattr(args, key, value)
     stages = [(s, n) for s, n in stage_schedule(args, experiment.get("strategy", "full_staged")) if n > 0]
     if not stages:
-        if args.model == "dcp":
+        if args.model == "dcp" and args.dcp_mode == "classical":
             raise ValueError("DCP requires --pretrain-seg-epochs + --finetune-epochs > 0")
         raise ValueError("At least one training stage must have a positive epoch count")
     train_config = dict(vars(args),
-                        training_protocol=("fixed-dcp-segmentation" if args.model == "dcp" else
+                        training_protocol=("fixed-dcp-segmentation" if args.model == "dcp" and args.dcp_mode == "classical" else
+                                           "learned-dcp-joint" if args.model == "dcp" and config["joint"] else
+                                           "learned-dcp-restoration" if args.model == "dcp" else
                                            "restoration-only" if not config["joint"] else
                                            experiment.get("strategy", "full_staged")),
                         stages=[dict(stage=s, epochs=n) for s, n in stages])
@@ -190,9 +192,13 @@ def run_training(args, experiment=None, experiment_name=None):
     write_json(save_dir / "split.json", data_split)
     write_json(save_dir / "config.json", dict(model_config=config, train_config=train_config, experiment=experiment))
     print(f"Device: {device}; train {len(train_ids)}, validation {len(val_ids)}; split: {data_split['grouping']}")
-    if args.model == "dcp":
+    if args.model == "dcp" and args.dcp_mode == "classical":
         print(f"DCP remains fixed; training LiteAttentionUNet for {stages[0][1]} epochs with CE + Dice. "
               "--pretrain-dehaze-epochs is unused; no dehazing or joint optimization stage is run.")
+    elif args.model == "dcp":
+        print("DCP uses trainable refinement after analytic recovery; "
+              f"schedule: {', '.join(f'{stage} {epochs}' for stage, epochs in stages)}. "
+              "This is the learned DCP extension.")
     rows, final_stats = [], {}
     for stage, epochs in stages:
         configure_stage(model, stage)

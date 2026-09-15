@@ -32,14 +32,22 @@ def constructor_defaults(cls):
             if p.default is not inspect.Parameter.empty}
 
 
-def model_config(name="coloraware", joint=True):
+def model_config(name="coloraware", joint=True, *, dcp_mode="classical"):
     if name not in MODELS:
         raise ValueError(f"Unknown model {name!r}; choose from {', '.join(MODELS)}")
     dehazer = constructor_defaults(MODELS[name])
     dehazer.update(OVERRIDES[name])
+    dehazer_type = "network"
+    if name == "dcp":
+        if dcp_mode not in ("learned", "classical"):
+            raise ValueError("DCP mode must be learned or classical")
+        if dcp_mode == "learned":
+            dehazer = constructor_defaults(DCPDehaze)
+            dehazer.update(use_learned_refine=True, force_trainable_refine=False)
+            dehazer_type = "learned-dcp"
     return dict(model=name, joint=joint, dehazer=dehazer,
                 segmenter=constructor_defaults(LiteAttentionUNet), imagenet_norm=True,
-                dehazer_type="network")
+                dehazer_type=dehazer_type)
 
 
 def build_model(config):
@@ -49,7 +57,7 @@ def build_model(config):
         raise ValueError(f"Unsupported model {name!r}; supported: {', '.join(MODELS)}")
     if config.get("dehazer_type") == "identity":
         dehazer = IdentityDehazer()
-    elif name == "dcp" and config.get("dehazer_type") == "legacy-dcp":
+    elif name == "dcp" and config.get("dehazer_type") in ("legacy-dcp", "learned-dcp"):
         dehazer = DCPDehaze(**config["dehazer"])
     else:
         dehazer = MODELS[name](**config["dehazer"])
