@@ -428,9 +428,15 @@ python -m dehaze_seg evaluate --checkpoint runs/sots/sots-indoor/coloraware/best
 
 评估会拒绝与去雾器或共用分割器训练数据存在已知重叠的样本，包括清晰参考文件哈希相同的复制数据。`--allow-training-overlap` 仅用于显式诊断，并在结果中记录重叠数量。这些检查不能证明未知训练历史的独立性，也无法识别所有经过变换或重新编码的副本。旧权重缺少划分清单时，会按 seed/val_ratio 重建请求的划分，要求数据内容未变；重建本身不构成独立测试集。
 
-`--metric-align crop` 默认将尺寸不一致的预测与参考图中心裁剪到共同区域；`resize` 将参考图缩放到预测尺寸；`none` 要求尺寸完全相同。训练保持原有数据预处理方式，评估默认原尺寸，因此训练日志与原尺寸评估结果可能不同。
+`--metric-align crop` 默认将尺寸不一致的预测与参考图中心裁剪到共同区域；`resize` 将参考图缩放到预测尺寸；`none` 要求尺寸完全相同。评估默认 `--metric-resolution original`：即使设置了 `--resize`，也会先放回原图尺寸再评分。要核对道路训练验证日志，须使用同一权重、同一划分，并**同时指定** `--resize 512 512 --metric-resolution inference`。此时直接在模型推理网格上评分，参考 RGB 使用 PIL 双线性缩放，标注使用最近邻缩放，与道路训练加载器一致：
 
-评估保存逐图 `metrics.csv`、汇总 `summary.json`，并在 `protocol.json` 记录样本 ID、模型配置、清晰参考和共用分割器来源。恢复指标按图平均，分割指标由全数据混淆矩阵计算；验证 PSNR 也按图平均。`--save-images` 保存评估图片，`--limit 1` 可只检查一张。
+```bash
+python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --resize 512 512 --metric-resolution inference --output results/road-eval-512
+```
+
+**指标定义：** `miou` 和 `mdice` 从同一个 `argmax` 硬标签预测及混淆矩阵计算，对背景（类别 0）和道路（类别 1）取平均；`iou_class_1`、`dice_class_1` 仅表示前景。硬标签 `mdice` 不等于 `1 − soft Dice loss`。在预测和标注中均不存在的类别计为 0。同一掩码、类别和汇总方式下，必有 `mdice >= miou`；将前景 Dice 与宏平均 mIoU 混用则不满足此前提。论文单图标注应读取同一逐图记录里的两列，不应混入全数据汇总值或训练损失。
+
+评估保存逐图 `metrics.csv`（含逐类别 IoU/Dice）、汇总 `summary.json`，并在 `protocol.json` 记录样本 ID、模型配置、权重哈希、清晰参考、指标定义、评分尺寸和共用分割器来源。`segmentation_metrics.json` 保留逐图混淆矩阵、标注哈希及实际评分尺寸，便于独立复算。恢复指标按图平均；数据集分割指标先累加混淆矩阵再计算，因此不一定等于 CSV 逐图指标的平均值。验证 PSNR 也按图平均。`--save-images` 始终保存原图尺寸的展示图片，即使指标在推理尺寸上计算；`--limit 1` 可只检查一张。
 
 ### 多模型比较
 
@@ -513,6 +519,18 @@ python -m dehaze_seg visualize introduction --data-root datasets --sample 001 --
 ```
 
 增益和组件可视化要求联合 ColorAwareUNet 权重。Introduction 拼图使用前一步生成的相同 sample 结果。各子命令可通过 `--help` 查看选项。
+
+### 重新生成分割对比图（图 7）
+
+```bash
+python -m dehaze_seg visualize segmentation --checkpoint weights/colorawareunet.pth --segmenter-checkpoint weights/colorawareunet.pth --include-dcp --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
+```
+
+该命令生成四栏：雾图、**经典 DCP**、ColorAwareUNet、GT，两种去雾结果共用同一个冻结分割器。`003` 是所给历史权重验证划分中的首个 ID，未发现它与训练集共用参考图。换用其他权重时，省略 `--sample` 可采用该权重的首个验证 ID，或指定其保存划分中的样本。程序拒绝训练样本及已知参考图重叠。该图是单个验证样本示例，不是独立测试集成绩，也不表示复现了表 1。
+
+图上标注为 **mIoU / mDice**，从同一张完整 512×512 硬标签掩码计算，包含背景与前景，并直接读取本次指标记录生成。红框放大只用于展示，不改变评分区域；展示图片保持原图宽高比。`--roi X0 Y0 X1 Y1` 为所有栏设置相同的归一化裁剪范围。输出包括 300 dpi 的 `figure7.png`、`figure7.pdf`、原始预测/GT 掩码、混淆矩阵、权重与输入哈希、CSV/JSON 指标及图注。
+
+取得其他模型的实际实验权重后，用 `--checkpoint 路径1 路径2 ...` 扩展图中方法；不会用旧图标注或分数补齐缺失权重。`--include-dcp` 使用无需权重的经典实现；训练后的 DCP 扩展须通过 checkpoint 加入，并单独标明。生成图片及本地权重保持 Git 忽略，生成代码会纳入公开仓库。
 
 <a id="project-structure"></a>
 

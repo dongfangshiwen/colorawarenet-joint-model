@@ -31,15 +31,22 @@ def chromaticity_ratio_error(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 @torch.no_grad()
 def confusion_matrix(pred: torch.Tensor, target: torch.Tensor, num_classes: int) -> torch.Tensor:
-    pred = pred.view(-1).long()
-    target = target.view(-1).long()
+    # Centre-cropped evaluation masks are often non-contiguous tensor views.
+    pred = pred.reshape(-1).long()
+    target = target.reshape(-1).long()
     keep = (target >= 0) & (target < num_classes)
     idx = target[keep] * num_classes + pred[keep].clamp(0, num_classes - 1)
     cm = torch.bincount(idx, minlength=num_classes * num_classes)
     return cm.reshape(num_classes, num_classes).cpu()
 
 
-def segmentation_metrics(cm: torch.Tensor, eps: float = 1e-6) -> Dict[str, float]:
+def segmentation_metrics(cm: torch.Tensor, eps: float = 1e-6) -> Dict[str, float | list]:
+    """Hard-mask metrics; macro averages include every class, including background.
+
+    Rows of ``cm`` are ground truth and columns are predictions. A class absent
+    from both masks contributes zero. For dataset scores, sum confusion matrices
+    before calling this function; do not average per-image macro scores.
+    """
     cm = cm.float()
     tp = torch.diag(cm)
     row = cm.sum(dim=1)
@@ -60,6 +67,14 @@ def segmentation_metrics(cm: torch.Tensor, eps: float = 1e-6) -> Dict[str, float
         "class_iou": [float(v) for v in iou.tolist()],
         "class_dice": [float(v) for v in dice.tolist()],
     }
+
+
+def segmentation_metric_row(metrics):
+    """Unambiguous scalar CSV columns, keeping macro and per-class Dice separate."""
+    row = {key: value for key, value in metrics.items() if isinstance(value, float)}
+    for name in ("iou", "dice"):
+        row.update({f"{name}_class_{i}": value for i, value in enumerate(metrics[f"class_{name}"])})
+    return row
 
 
 class AverageMeter:

@@ -416,9 +416,15 @@ Evaluation defaults to the saved validation split on a known training/validation
 
 Known overlap with the training samples of either the dehazer or the shared segmenter is rejected, including copied clear files with matching hashes. `--allow-training-overlap` permits an explicitly labelled diagnostic and records overlap in the results. These checks cannot certify unknown training history or detect every transformed/re-encoded copy. Historical weights without a manifest reconstruct a requested split from seed/ratio and require unchanged data contents; they do not establish an independent test set.
 
-`--metric-align crop` center-crops mismatched predictions and references to their common size; `resize` resizes the reference; `none` requires equal dimensions. Training uses its configured resize, while evaluation defaults to native resolution, so their results can differ.
+`--metric-align crop` center-crops mismatched predictions and references to their common size; `resize` resizes the reference; `none` requires equal dimensions. Evaluation defaults to `--metric-resolution original`: even with `--resize`, outputs are upsampled before scoring. To match the road training validation grid, use the same checkpoint/split and **both** `--resize 512 512 --metric-resolution inference`. This scores predictions before output upsampling and resizes RGB references with PIL bilinear interpolation and masks with nearest-neighbor interpolation, as in the road loader:
 
-Per-image results are saved in `metrics.csv`, aggregates in `summary.json`, and sample IDs, model configuration, references and shared-segmenter provenance in `protocol.json`. Restoration metrics are averaged per image; segmentation metrics use the full confusion matrix. Validation PSNR uses per-image averaging. `--save-images` exports evaluation images; `--limit 1` processes one sample.
+```bash
+python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --resize 512 512 --metric-resolution inference --output results/road-eval-512
+```
+
+**Metric definitions:** `miou` and `mdice` are computed from the same `argmax` mask and confusion matrix, averaging background (class 0) and road (class 1). `iou_class_1` and `dice_class_1` are foreground-only scores. Hard `mdice` is different from `1 − soft Dice loss`. Classes absent from both masks contribute zero. With matching classes, masks and aggregation, `mdice >= miou`; mixing foreground Dice with macro IoU invalidates that comparison. Figure annotations must use the two corresponding columns from the same per-image row, without substituting dataset aggregates or loss values.
+
+Per-image results (including per-class IoU/Dice) are saved in `metrics.csv`, aggregates in `summary.json`, and sample IDs, model configuration, checkpoint hash, references, metric definitions/resolution and shared-segmenter provenance in `protocol.json`. `segmentation_metrics.json` preserves per-image confusion matrices, mask hashes and actual scoring dimensions for independent checks. Restoration metrics are averaged per image; dataset segmentation scores are computed after summing confusion matrices, so they need not equal the mean of the CSV scores. Validation PSNR uses per-image averaging. `--save-images` exports original-resolution presentation images even when scoring at inference resolution; `--limit 1` processes one sample.
 
 ### Compare checkpoints
 
@@ -492,6 +498,18 @@ python -m dehaze_seg visualize introduction --data-root datasets --sample 001 --
 ```
 
 Gain/component visualization requires a joint ColorAwareUNet checkpoint. The introduction panel consumes the matching sample produced by gain visualization. Each subcommand supports `--help`.
+
+### Regenerate the segmentation comparison (Figure 7)
+
+```bash
+python -m dehaze_seg visualize segmentation --checkpoint weights/colorawareunet.pth --segmenter-checkpoint weights/colorawareunet.pth --include-dcp --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
+```
+
+This generates four columns: hazy input, **classical DCP**, ColorAwareUNet and ground truth. Both dehazers use the same frozen segmenter. Sample `003` is the first ID in the supplied historical checkpoint's validation split; it has no detected training-reference overlap. For other checkpoints, omit `--sample` to use their first validation ID, or select an ID from their saved split. Training samples and known reference overlap are rejected. This is a single validation example, not an independent test set or a reproduction of Table 1.
+
+Scores are **mIoU / mDice**, computed from the same full 512×512 hard masks, including background and foreground. They are generated directly from the metric records. The red-box enlargements are illustrative and do not change the scoring region. Display panels preserve the original aspect ratio. `--roi X0 Y0 X1 Y1` sets one normalized crop for every panel. All prediction/target masks, confusion matrices, checkpoint/input hashes, CSV/JSON records and the caption accompany `figure7.png` (300 dpi) and `figure7.pdf`.
+
+Supply additional actual experiment weights with `--checkpoint path1 path2 ...` to add other models. Missing model weights are never replaced with old figure labels or scores. `--include-dcp` uses the parameter-free classical implementation; a trained DCP extension must be supplied as a checkpoint and is labelled separately. Generated figures and local weights remain ignored by Git; the generation code is included in the repository.
 
 ## Project structure
 

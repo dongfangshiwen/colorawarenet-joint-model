@@ -90,6 +90,9 @@ def inference(parser, evaluate=False):
         parser.add_argument("--split-file", help="Saved split.json")
         parser.add_argument("--allow-training-overlap", action="store_true", help="Explicit diagnostic only: allow known training samples in evaluation")
         parser.add_argument("--metric-align", choices=("crop", "resize", "none"), default="crop")
+        parser.add_argument("--metric-resolution", choices=("original", "inference"), default="original",
+                            help="Score at original resolution (default), or before output upsampling; "
+                                 "inference with --resize 512 512 matches road training validation preprocessing")
         parser.add_argument("--save-images", action="store_true")
     else:
         parser.add_argument("--input", required=True, help="Hazy image or directory")
@@ -108,7 +111,7 @@ def build_parser(training_prog=None):
     ablate.add_argument("--experiments", default="arch_baseline_unet,arch_no_color_gain,arch_no_refine,arch_full",
                         help="Comma-separated names or all")
     visualize = commands.add_parser("visualize", help="Visualize gains, components, or training curves")
-    visualize.add_argument("kind", choices=("gain", "components", "curves", "introduction"))
+    visualize.add_argument("kind", choices=("gain", "components", "curves", "introduction", "segmentation"))
     visualize.add_argument("options", nargs=argparse.REMAINDER, help="Use visualize KIND --help")
     return parser
 
@@ -116,7 +119,7 @@ def build_parser(training_prog=None):
 def main(argv=None, training_prog=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        if len(argv) >= 2 and argv[0] == "visualize" and argv[1] in ("gain", "components", "introduction"):
+        if len(argv) >= 2 and argv[0] == "visualize" and argv[1] in ("gain", "components", "introduction", "segmentation"):
             import torch
             torch.set_num_threads(4)
             module = importlib.import_module(".visualization." + argv[1], package="dehaze_seg")

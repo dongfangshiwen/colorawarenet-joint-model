@@ -4,7 +4,7 @@ import json
 import random
 from pathlib import Path
 
-from .common import find_by_stem
+from .common import IMG_EXTS, find_by_stem
 from .datasets import split_ids
 
 
@@ -125,6 +125,19 @@ def training_overlap(dataset, root, ids, checkpoint_path, checkpoint, records=No
     """
     record = checkpoint_split(checkpoint_path, checkpoint)
     saved = checkpoint.get("train_config", checkpoint.get("args", {}))
+    # The released historical road checkpoint stores seed/ratio but no manifest.
+    # On its original root we can reconstruct the same sample split that
+    # select_split uses, including duplicate clear references. Otherwise an
+    # evaluation of the entire training root would misleadingly report zero
+    # known overlap. Do not infer a split for unrelated/moved/unknown roots.
+    if (record is None and dataset == "paired-road"
+            and saved.get("dataset", "paired-road") == "paired-road"
+            and {"data_root", "seed", "val_ratio", "pretrain_seg_epochs", "finetune_epochs"} <= saved.keys()
+            and canonical_root(saved["data_root"]) == canonical_root(root)):
+        hazy, clear, masks = paired_directories(dataset, root)
+        if hazy.is_dir() and clear.is_dir() and masks.is_dir():
+            all_ids = sorted(p.stem for p in hazy.iterdir() if p.is_file() and p.suffix.lower() in IMG_EXTS)
+            record = training_split(dataset, root, all_ids, saved["val_ratio"], saved["seed"], split_unit="sample")
     if not record or record.get("dataset", saved.get("dataset")) != dataset:
         return []
     train_root = record.get("train_root", saved.get("data_root"))

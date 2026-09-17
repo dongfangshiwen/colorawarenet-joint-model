@@ -11,7 +11,7 @@ from ..data.common import IMG_EXTS, find_by_stem, pil_to_rgb_tensor, mask_to_lab
 from ..data.datasets import split_ids
 from ..data.splits import (paired_directories, clear_reference, canonical_root, checkpoint_split,
                            training_overlap, sample_records, file_digest)
-from ..metrics import confusion_matrix, segmentation_metrics
+from ..metrics import confusion_matrix, segmentation_metrics, segmentation_metric_row
 from ..models.joint import JointDehazeSegModel, unpack_dehaze_output
 from ..models.registry import build_model, model_config
 from ..models.DCP import ClassicalDCP
@@ -36,10 +36,11 @@ def tensor_image(tensor):
 
 
 @torch.no_grad()
-def infer_image(model, image, device, resize=None):
+def infer_image(model, image, device, resize=None, return_to_original=True):
     original_size = (image.height, image.width)
     if resize:
         image = image.resize((resize[1], resize[0]), Image.Resampling.BILINEAR)
+    output_size = original_size if return_to_original else (image.height, image.width)
     x = pil_to_rgb_tensor(image).unsqueeze(0).to(device)
     h, w = x.shape[-2:]
     ph, pw = max(32, ((h + 15) // 16) * 16) - h, max(32, ((w + 15) // 16) * 16) - w
@@ -58,12 +59,12 @@ def infer_image(model, image, device, resize=None):
         restored, aux = unpack_dehaze_output(model(x))
         logits = None
     restored = restored[..., :h, :w]
-    if restored.shape[-2:] != original_size:
-        restored = F.interpolate(restored, size=original_size, mode="bilinear", align_corners=False)
+    if restored.shape[-2:] != output_size:
+        restored = F.interpolate(restored, size=output_size, mode="bilinear", align_corners=False)
     if logits is not None:
         logits = logits[..., :h, :w]
-        if logits.shape[-2:] != original_size:
-            logits = F.interpolate(logits, size=original_size, mode="bilinear", align_corners=False)
+        if logits.shape[-2:] != output_size:
+            logits = F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)
     return restored, logits, aux
 
 
@@ -138,6 +139,13 @@ def use_shared_segmenter(model, shared):
 
 
 def save_prediction(folder, stem, hazy, pred, logits, clear=None):
+    # Saved presentation images retain native size even when scores use the
+    # model's inference grid. Never use these upsampled masks for those scores.
+    size = (hazy.height, hazy.width)
+    if pred.shape[-2:] != size:
+        pred = F.interpolate(pred, size=size, mode="bilinear", align_corners=False)
+    if logits is not None and logits.shape[-2:] != size:
+        logits = F.interpolate(logits, size=size, mode="bilinear", align_corners=False)
     output = tensor_image(pred)
     output.save(ensure_dir(folder / "dehazed") / f"{stem}.png")
     panels = [hazy, output]
@@ -229,20 +237,32 @@ def run_inference(args, evaluate=False):
                           else "learned-refinement" if config.get("dehazer_type") == "learned-dcp"
                           else "classical" if config["model"] == "dcp" else "network")
         protocol = dict(samples=[p.stem for p in images], model_config=config,
+                        checkpoint_sha256=file_digest(checkpoint_path) if checkpoint_path else None,
                         shared_segmenter=shared_info,
                         segmentation="shared-frozen" if shared else "checkpoint" if config["joint"] else "none")
+        score_at_inference = evaluate and args.metric_resolution == "inference"
         if evaluate:
             protocol.update(dataset=args.dataset, data_root=canonical_root(args.data_root),
                             references=eval_records, known_training_overlap=sorted(overlap),
                             allow_training_overlap=args.allow_training_overlap,
                             metric_align=args.metric_align, resize=args.resize,
+                            metric_resolution=args.metric_resolution,
+                            metric_definitions=dict(prediction="argmax over logits", classes="all, including background",
+                                miou="mean of class IoU", mdice="mean of class hard Dice; not soft Dice loss",
+                                absent_class="zero when absent from both prediction and target", epsilon=1e-6,
+                                per_image="one confusion matrix per image",
+                                summary="sum confusion matrices, then compute class and macro metrics",
+                                confusion_matrix="rows: target; columns: prediction"),
+                            reference_resize="PIL bilinear RGB, nearest mask" if score_at_inference and args.resize else None,
+                            saved_image_resolution="original; scores may use the inference grid",
                             split_requested=args.split or "auto")
         write_json(folder / "protocol.json", protocol)
-        rows, cm = [], None
+        rows, cm, segmentation_rows = [], None, []
         for path in images:
             with Image.open(path) as image:
                 hazy = image.convert("RGB")
-            pred, logits, aux = infer_image(model, hazy, device, args.resize)
+            pred, logits, aux = infer_image(model, hazy, device, args.resize,
+                                            return_to_original=not score_at_inference)
             row, clear_image = {"sample": path.stem}, None
             gain = aux.get("color_gain")
             if gain is not None:
@@ -254,7 +274,9 @@ def run_inference(args, evaluate=False):
                     raise ValueError(f"Missing clear reference for {path.name}")
                 with Image.open(cp) as image:
                     clear_image = image.convert("RGB")
-                target = pil_to_rgb_tensor(clear_image)[None].to(device)
+                reference = (clear_image.resize((args.resize[1], args.resize[0]), Image.Resampling.BILINEAR)
+                             if score_at_inference and args.resize else clear_image)
+                target = pil_to_rgb_tensor(reference)[None].to(device)
                 p, t = align_pair(pred, target, args.metric_align)
                 row.update(image_metrics(p, t))
                 if logits is not None and mask_dir is not None:
@@ -262,11 +284,16 @@ def run_inference(args, evaluate=False):
                     if mp is None:
                         raise ValueError(f"Missing segmentation mask for {path.name}")
                     with Image.open(mp) as image:
+                        if score_at_inference and args.resize:
+                            image = image.resize((args.resize[1], args.resize[0]), Image.Resampling.NEAREST)
                         target_mask = mask_to_label_tensor(image, logits.shape[1])[None, None].to(device)
                     p, t = align_pair(logits.argmax(1, keepdim=True), target_mask, args.metric_align, label=True)
                     current = confusion_matrix(p, t, logits.shape[1])
                     cm = current if cm is None else cm + current
-                    row.update({k: v for k, v in segmentation_metrics(current).items() if isinstance(v, float)})
+                    metrics = segmentation_metrics(current)
+                    row.update(segmentation_metric_row(metrics))
+                    segmentation_rows.append(dict(sample=path.stem, height=p.shape[-2], width=p.shape[-1],
+                        confusion_matrix=current.tolist(), mask_sha256=file_digest(mp), **metrics))
             if not evaluate or args.save_images:
                 save_prediction(folder, path.stem, hazy, pred, logits, clear_image)
             rows.append(row)
@@ -280,7 +307,14 @@ def run_inference(args, evaluate=False):
             if key != "sample":
                 summary[key] = sum(r[key] for r in rows) / len(rows)
         if cm is not None:
-            summary.update(segmentation_metrics(cm))
+            metrics = segmentation_metrics(cm)
+            summary.update(metrics)
+            summary.update(segmentation_metric_row(metrics))
+            summary.update(metric_resolution=args.metric_resolution, confusion_matrix=cm.tolist())
+            write_json(folder / "segmentation_metrics.json", dict(
+                definitions=protocol["metric_definitions"], metric_resolution=args.metric_resolution,
+                checkpoint_sha256=protocol["checkpoint_sha256"], samples=segmentation_rows,
+                aggregate=dict(confusion_matrix=cm.tolist(), **metrics)))
         write_csv(folder / "metrics.csv", rows)
         write_json(folder / "summary.json", summary)
         summaries.append(summary)
