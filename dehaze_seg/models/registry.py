@@ -28,8 +28,10 @@ OVERRIDES = {
 
 
 def constructor_defaults(cls):
+    # Constructor helpers (e.g. FFA-Net's convolution factory) belong to code,
+    # not serialized experiment settings. Keep JSON and weights_only loading safe.
     return {name: p.default for name, p in inspect.signature(cls).parameters.items()
-            if p.default is not inspect.Parameter.empty}
+            if p.default is not inspect.Parameter.empty and not callable(p.default)}
 
 
 def model_config(name="coloraware", joint=True, *, dcp_mode="classical"):

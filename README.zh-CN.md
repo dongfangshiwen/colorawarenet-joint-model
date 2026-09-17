@@ -523,14 +523,16 @@ python -m dehaze_seg visualize introduction --data-root datasets --sample 001 --
 ### 重新生成分割对比图（图 7）
 
 ```bash
-python -m dehaze_seg visualize segmentation --checkpoint weights/colorawareunet.pth --segmenter-checkpoint weights/colorawareunet.pth --include-dcp --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
+python generate_figure7.py --checkpoint ckpt_datasets_joint/dcp/best.pth ckpt_datasets_joint/ffanet/best.pth ckpt_datasets_joint/grid/best.pth ckpt_datasets_joint/psd/best.pth ckpt_datasets_joint/coloraware/best.pth ckpt_datasets_joint/c2pnet/best.pth --segmenter-checkpoint ckpt_datasets_joint/coloraware/best.pth --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
 ```
 
-该命令生成四栏：雾图、**经典 DCP**、ColorAwareUNet、GT，两种去雾结果共用同一个冻结分割器。`003` 是所给历史权重验证划分中的首个 ID，未发现它与训练集共用参考图。换用其他权重时，省略 `--sample` 可采用该权重的首个验证 ID，或指定其保存划分中的样本。程序拒绝训练样本及已知参考图重叠。该图是单个验证样本示例，不是独立测试集成绩，也不表示复现了表 1。
+该命令生成**八栏**：雾图、DCP、FFA-Net、GridDehazeNet、PSD、ColorAwareUNet、C2PNet 和 GT。六种去雾结果共用同一个冻结分割器。脚本要求六种方法齐全，缺少权重时在推理前报错，不生成不完整的图 7。以上路径对应历史实验目录，请按实际权重位置修改；`python -m dehaze_seg visualize segmentation` 提供相同入口。没有可用 CUDA 时使用 `--device cpu`。
+
+`003` 是所给历史权重验证划分中的首个 ID。换用其他权重时，省略 `--sample` 可采用该权重的首个验证 ID，或指定其保存划分中的样本。程序拒绝训练样本及已知参考图重叠。该图是单个验证样本示例，不是独立测试集成绩，也不表示复现了表 1。
 
 图上标注为 **mIoU / mDice**，从同一张完整 512×512 硬标签掩码计算，包含背景与前景，并直接读取本次指标记录生成。红框放大只用于展示，不改变评分区域；展示图片保持原图宽高比。`--roi X0 Y0 X1 Y1` 为所有栏设置相同的归一化裁剪范围。输出包括 300 dpi 的 `figure7.png`、`figure7.pdf`、原始预测/GT 掩码、混淆矩阵、权重与输入哈希、CSV/JSON 指标及图注。
 
-取得其他模型的实际实验权重后，用 `--checkpoint 路径1 路径2 ...` 扩展图中方法；不会用旧图标注或分数补齐缺失权重。`--include-dcp` 使用无需权重的经典实现；训练后的 DCP 扩展须通过 checkpoint 加入，并单独标明。生成图片及本地权重保持 Git 忽略，生成代码会纳入公开仓库。
+历史 DCP 权重对应仓库中的增强实现，图中会标明其版本。若需比较**无需权重的经典 DCP**，从命令中移除 DCP 权重路径并添加 `--include-dcp`，其余五个权重仍必须提供。不会用旧图标注或分数补齐缺失权重。生成图片及本地权重保持 Git 忽略，生成代码纳入公开仓库。
 
 <a id="project-structure"></a>
 
@@ -538,6 +540,7 @@ python -m dehaze_seg visualize segmentation --checkpoint weights/colorawareunet.
 
 ```text
 train.py             # 直接训练入口
+generate_figure7.py   # 六模型完整分割对比图
 dehaze_seg/
 ├── models/          # 论文模型、对比模型、输出适配与统一注册表
 ├── data/            # 道路三元组和各基准配对/增强

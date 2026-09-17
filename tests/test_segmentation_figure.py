@@ -1,5 +1,6 @@
 """Figure annotations, CSV and saved masks must describe the same predictions."""
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,7 +12,7 @@ import torch
 from dehaze_seg.data.splits import training_split
 from dehaze_seg.engine.checkpoint import save_checkpoint
 from dehaze_seg.models.registry import build_model, model_config
-from dehaze_seg.visualization.segmentation import generate, parse_args
+from dehaze_seg.visualization.segmentation import generate, parse_args, PAPER_MODELS
 
 
 class SegmentationFigureTests(unittest.TestCase):
@@ -28,19 +29,26 @@ class SegmentationFigureTests(unittest.TestCase):
                 Image.fromarray(255-rgb).save(root / "data/clear" / f"{sample}.png")
                 Image.fromarray((rgb[..., 0] > 128).astype(np.uint8)).save(root / "data/masks" / f"{sample}.png")
             split = training_split("paired-road", root / "data", ids, val_ratio=.25)
-            cfg = model_config()
-            cfg["dehazer"]["base_ch"] = cfg["segmenter"]["base_ch"] = 8
-            checkpoint = root / "joint.pth"
-            torch.manual_seed(3)
-            model = build_model(cfg).eval()
-            save_checkpoint(checkpoint, model, cfg, {}, "joint", 1, {}, data_split=split)
-            args = parse_args(["--checkpoint", str(checkpoint), "--segmenter-checkpoint", str(checkpoint),
+            checkpoints = []
+            for name in PAPER_MODELS:
+                if name == "dcp":
+                    continue
+                cfg = model_config(name)
+                cfg["dehazer"]["base_ch"] = cfg["segmenter"]["base_ch"] = 8
+                cfg = json.loads(json.dumps(cfg))
+                checkpoint = root / f"{name}.pth"
+                torch.manual_seed(3)
+                model = build_model(cfg).eval()
+                save_checkpoint(checkpoint, model, cfg, {}, "joint", 1, {}, data_split=split)
+                checkpoints.append(str(checkpoint))
+            args = parse_args(["--checkpoint", *reversed(checkpoints), "--segmenter-checkpoint", str(root/"coloraware.pth"),
                 "--data-root", str(root/"data"), "--output", str(root/"figure"), "--include-dcp",
                 "--resize", "32", "48", "--device", "cpu", "--threads", "2"])
             with patch("dehaze_seg.visualization.segmentation.save_figure") as render:
                 record = generate(args)
             self.assertEqual(record["sample"], split["val"][0])
-            self.assertEqual(len(record["methods"]), 2)
+            self.assertEqual([m["model_config"]["model"] for m in record["methods"]], list(PAPER_MODELS))
+            self.assertEqual(len(render.call_args.args[0]), 8)  # Hazy + six methods + GT.
             self.assertTrue(record["shared_segmenter"]["frozen"])
             with Image.open(root/"figure/target_mask.png") as image:
                 target = np.asarray(image)
@@ -56,6 +64,12 @@ class SegmentationFigureTests(unittest.TestCase):
             args.sample = split["train"][0]
             with self.assertRaisesRegex(ValueError, "outside the selected validation"):
                 generate(args)
+            args.sample = None
+            args.checkpoint = [str(root/"coloraware.pth")]
+            args.output = str(root/"incomplete")
+            with self.assertRaisesRegex(ValueError, "requires all six methods"):
+                generate(args)
+            self.assertFalse(Path(args.output).exists())
 
 
 if __name__ == "__main__":

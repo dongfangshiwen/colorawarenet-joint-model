@@ -502,19 +502,22 @@ Gain/component visualization requires a joint ColorAwareUNet checkpoint. The int
 ### Regenerate the segmentation comparison (Figure 7)
 
 ```bash
-python -m dehaze_seg visualize segmentation --checkpoint weights/colorawareunet.pth --segmenter-checkpoint weights/colorawareunet.pth --include-dcp --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
+python generate_figure7.py --checkpoint ckpt_datasets_joint/dcp/best.pth ckpt_datasets_joint/ffanet/best.pth ckpt_datasets_joint/grid/best.pth ckpt_datasets_joint/psd/best.pth ckpt_datasets_joint/coloraware/best.pth ckpt_datasets_joint/c2pnet/best.pth --segmenter-checkpoint ckpt_datasets_joint/coloraware/best.pth --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
 ```
 
-This generates four columns: hazy input, **classical DCP**, ColorAwareUNet and ground truth. Both dehazers use the same frozen segmenter. Sample `003` is the first ID in the supplied historical checkpoint's validation split; it has no detected training-reference overlap. For other checkpoints, omit `--sample` to use their first validation ID, or select an ID from their saved split. Training samples and known reference overlap are rejected. This is a single validation example, not an independent test set or a reproduction of Table 1.
+This generates **eight columns**: hazy input, DCP, FFA-Net, GridDehazeNet, PSD, ColorAwareUNet and C2PNet, followed by ground truth. All six dehazers use the same frozen segmenter. The script requires all six methods and fails before inference if any checkpoint is missing; it never produces a partial Figure 7. The paths above describe the historical experiment directory; replace them with your actual weights. `python -m dehaze_seg visualize segmentation` provides the same interface. Use `--device cpu` if CUDA is unavailable.
+
+Sample `003` is the first ID in the supplied historical checkpoints' validation split. For other checkpoints, omit `--sample` to use their first validation ID, or select an ID from their saved split. Training samples and known reference overlap are rejected. This is a single validation example, not an independent test set or a reproduction of Table 1.
 
 Scores are **mIoU / mDice**, computed from the same full 512×512 hard masks, including background and foreground. They are generated directly from the metric records. The red-box enlargements are illustrative and do not change the scoring region. Display panels preserve the original aspect ratio. `--roi X0 Y0 X1 Y1` sets one normalized crop for every panel. All prediction/target masks, confusion matrices, checkpoint/input hashes, CSV/JSON records and the caption accompany `figure7.png` (300 dpi) and `figure7.pdf`.
 
-Supply additional actual experiment weights with `--checkpoint path1 path2 ...` to add other models. Missing model weights are never replaced with old figure labels or scores. `--include-dcp` uses the parameter-free classical implementation; a trained DCP extension must be supplied as a checkpoint and is labelled separately. Generated figures and local weights remain ignored by Git; the generation code is included in the repository.
+The historical DCP checkpoint contains the repository's enhanced DCP implementation and is labelled accordingly. To compare **classical parameter-free DCP** instead, remove the DCP checkpoint from the command and add `--include-dcp`; the other five checkpoints are still required. Missing weights are never replaced with old labels or scores. Generated figures and local weights remain ignored by Git; the generation code is included in the repository.
 
 ## Project structure
 
 ```text
 train.py                  # Direct training entrypoint
+generate_figure7.py        # Complete six-model segmentation figure
 dehaze_seg/
 ├── models/               # Model definitions, registry and output adaptation
 ├── data/                 # Pairing, masks and synchronized augmentation

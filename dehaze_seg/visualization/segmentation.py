@@ -23,11 +23,13 @@ from ..utils import ensure_dir, select_device, write_csv, write_json
 
 LABELS = dict(coloraware="ColorAwareUNet (Ours)", dcp="DCP", c2pnet="C2PNet",
               ffanet="FFA-Net", grid="GridDehazeNet", psd="PSD")
+PAPER_MODELS = ("dcp", "ffanet", "grid", "psd", "coloraware", "c2pnet")
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", nargs="+", required=True, help="Actual dehazer/joint experiment checkpoints")
+    parser = argparse.ArgumentParser(description="Generate the complete six-model Figure 7 from actual experiment weights")
+    parser.add_argument("--checkpoint", nargs="+", required=True,
+                        help="FFA-Net, GridDehazeNet, PSD, ColorAwareUNet, C2PNet weights; optionally learned DCP weights")
     parser.add_argument("--segmenter-checkpoint", required=True, help="One frozen joint checkpoint's segmenter for all methods")
     parser.add_argument("--legacy-profile", choices=PROFILES)
     parser.add_argument("--segmenter-legacy-profile", choices=PROFILES)
@@ -52,6 +54,29 @@ def parse_args(argv=None):
     return args
 
 
+def figure_sources(args):
+    """Fail before inference/writing files when a paper comparison is incomplete."""
+    sources = {"dcp": None} if args.include_dcp else {}
+    for checkpoint_path in args.checkpoint:
+        if not Path(checkpoint_path).is_file():
+            raise FileNotFoundError(f"Missing experiment checkpoint: {checkpoint_path}")
+        # Strict CPU loading validates both the identifier and architecture. Drop
+        # each model immediately so the preflight does not retain six networks.
+        model, config, checkpoint = load_checkpoint(checkpoint_path, "cpu", args.legacy_profile)
+        name = config["model"]
+        del model, checkpoint
+        if name in sources:
+            raise ValueError(f"Duplicate {name} source; provide exactly one checkpoint per method, "
+                             "and use either --include-dcp or a DCP checkpoint")
+        sources[name] = checkpoint_path
+    missing = set(PAPER_MODELS) - sources.keys()
+    if missing:
+        raise ValueError("Figure 7 requires all six methods. Missing: " + ", ".join(sorted(missing)) +
+                         ". Supply their trained checkpoints; --include-dcp supplies classical DCP. "
+                         "No partial Figure 7 was generated.")
+    return [sources[name] for name in PAPER_MODELS]
+
+
 def overlay(rgb, labels):
     return np.where(labels[..., None] > 0, rgb * .60 + np.array([1., .20, .20]) * .40, rgb)
 
@@ -59,20 +84,21 @@ def overlay(rgb, labels):
 def save_figure(panels, records, roi, aspect, output):
     """Metric labels come directly from the same records saved alongside masks."""
     n = len(panels)
-    fig = plt.figure(figsize=(3.1*n, 4.25), dpi=300, facecolor="white")
+    fig = plt.figure(figsize=(2.1*n, 3.65), dpi=300, facecolor="white")
     left, gap = .012, .010
     width = (1 - 2*left - (n-1)*gap)/n
     x0, y0, x1, y1 = roi
     for i, (label, rgb) in enumerate(panels):
         x = left + i*(width+gap)
         center = x + width/2
-        fig.text(center, .965, label, ha="center", va="center", fontsize=14, fontweight="semibold")
+        fig.text(center, .99, label.replace(" (", "\n("), ha="center", va="top",
+                 fontsize=16, fontweight="semibold", linespacing=1.05)
         record = records[i]
         text = (f"{record['miou']:.4f} / {record['mdice']:.4f}" if record else "mIoU / mDice")
-        fig.text(center, .895, text, ha="center", va="center", fontsize=14)
+        fig.text(center, .80, text, ha="center", va="center", fontsize=16)
         h, w = rgb.shape[:2]
         for row in (0, 1):
-            ax = fig.add_axes([x, .430 if row == 0 else .070, width, .395 if row == 0 else .295])
+            ax = fig.add_axes([x, .385 if row == 0 else .070, width, .36 if row == 0 else .265])
             if row == 0:
                 ax.imshow(rgb, extent=(0, aspect, 1, 0), interpolation="nearest", aspect="equal")
                 ax.add_patch(Rectangle((x0*aspect, y0), (x1-x0)*aspect, y1-y0,
@@ -86,7 +112,7 @@ def save_figure(panels, records, roi, aspect, output):
                 spine.set_edgecolor("#d92323" if row else "#777777")
                 spine.set_linewidth(1 if row else .65)
     fig.text(.5, .020, "Red shading: foreground mask     Red boxes: enlarged regions     Scores: full inference grid",
-             ha="center", fontsize=10.5)
+             ha="center", fontsize=12)
     fig.savefig(output / "figure7.png", dpi=300)
     fig.savefig(output / "figure7.pdf", dpi=300)
     plt.close(fig)
@@ -95,6 +121,7 @@ def save_figure(panels, records, roi, aspect, output):
 @torch.inference_mode()
 def generate(args):
     torch.set_num_threads(args.threads)
+    sources = figure_sources(args)
     device = select_device(args.device)
     shared, shared_config, shared_checkpoint = load_checkpoint(
         args.segmenter_checkpoint, device, args.segmenter_legacy_profile)
@@ -130,7 +157,6 @@ def generate(args):
     output = ensure_dir(args.output)
     Image.fromarray(target_array).save(output / "target_mask.png")
     panels, plot_records, method_records, csv_rows = [("Hazy input", input_rgb)], [None], [], []
-    sources = ([None] if args.include_dcp else []) + list(args.checkpoint)
     for i, checkpoint_path in enumerate(sources):
         if checkpoint_path is None:
             config = model_config("dcp", joint=False)
@@ -143,7 +169,8 @@ def generate(args):
                 raise ValueError(f"Sample {sample} overlaps training data for {checkpoint_path}")
             label = LABELS[config["model"]]
             if config["model"] == "dcp":
-                label += " (learned)" if config.get("dehazer_type") == "learned-dcp" else " (checkpoint)"
+                label += {"learned-dcp": " (learned)", "legacy-dcp": " (historical)"}.get(
+                    config.get("dehazer_type"), " (classical)")
             digest = file_digest(checkpoint_path)
         model = use_shared_segmenter(model, shared)
         restored, logits, _ = infer_image(model, hazy, device, args.resize, return_to_original=False)
@@ -181,7 +208,8 @@ def generate(args):
         f"Full-image mIoU and mDice are computed at {args.resize[0]} x {args.resize[1]} from hard labels, "
         "averaged over background and foreground. Red shading denotes the foreground; "
         "the bottom row enlarges the red boxes. Display panels preserve the source aspect ratio. "
-        "These are single-image results; the DCP panel uses the classical parameter-free implementation.")
+        "These are single-image results. " + ("The DCP panel uses the classical parameter-free implementation."
+            if args.include_dcp else "The DCP panel uses its checkpoint's recorded implementation."))
     (output/"caption.txt").write_text(caption+"\n", encoding="utf-8")
     print(json.dumps(dict(sample=sample, scores=csv_rows, figure=str(output/"figure7.png")), ensure_ascii=False))
     return record
