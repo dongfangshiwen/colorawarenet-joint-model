@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 from matplotlib.patches import Rectangle
 import numpy as np
 from PIL import Image
@@ -43,6 +44,7 @@ def parse_args(argv=None):
     parser.add_argument("--output", default="results/figure7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--metric-font", help="Path to a Times New Roman TTF/OTF file; otherwise use the installed font")
     args = parser.parse_args(argv)
     # Multiples of 16 avoid padding changing the training validation grid.
     if any(n < 32 or n % 16 for n in args.resize) or args.threads < 1:
@@ -81,9 +83,23 @@ def overlay(rgb, labels):
     return np.where(labels[..., None] > 0, rgb * .60 + np.array([1., .20, .20]) * .40, rgb)
 
 
-def save_figure(panels, records, roi, aspect, output):
+def metric_font(path=None):
+    if path:
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"Metric font file not found: {path}")
+        return font_manager.FontProperties(fname=str(path))
+    try:
+        font_path = font_manager.findfont("Times New Roman", fallback_to_default=False)
+    except ValueError as exc:
+        raise ValueError("Times New Roman is required for Figure 7 metrics. Install it or pass "
+                         "--metric-font /path/to/times.ttf. No substitute font was used.") from exc
+    return font_manager.FontProperties(fname=font_path)
+
+
+def save_figure(panels, records, roi, aspect, output, score_font=None):
     """Metric labels come directly from the same records saved alongside masks."""
     n = len(panels)
+    score_font = score_font or metric_font()
     fig = plt.figure(figsize=(2.1*n, 3.65), dpi=300, facecolor="white")
     left, gap = .012, .010
     width = (1 - 2*left - (n-1)*gap)/n
@@ -91,11 +107,11 @@ def save_figure(panels, records, roi, aspect, output):
     for i, (label, rgb) in enumerate(panels):
         x = left + i*(width+gap)
         center = x + width/2
-        fig.text(center, .99, label.replace(" (", "\n("), ha="center", va="top",
+        fig.text(center, .99, label.split(" (", 1)[0], ha="center", va="top",
                  fontsize=16, fontweight="semibold", linespacing=1.05)
         record = records[i]
         text = (f"{record['miou']:.4f} / {record['mdice']:.4f}" if record else "mIoU / mDice")
-        fig.text(center, .80, text, ha="center", va="center", fontsize=16)
+        fig.text(center, .80, text, ha="center", va="center", fontsize=16, fontproperties=score_font)
         h, w = rgb.shape[:2]
         for row in (0, 1):
             ax = fig.add_axes([x, .385 if row == 0 else .070, width, .36 if row == 0 else .265])
@@ -122,6 +138,7 @@ def save_figure(panels, records, roi, aspect, output):
 def generate(args):
     torch.set_num_threads(args.threads)
     sources = figure_sources(args)
+    score_font = metric_font(args.metric_font)
     device = select_device(args.device)
     shared, shared_config, shared_checkpoint = load_checkpoint(
         args.segmenter_checkpoint, device, args.segmenter_legacy_profile)
@@ -199,10 +216,12 @@ def generate(args):
         target_mask="target_mask.png", sources={k:dict(file=p.name, sha256=file_digest(p)) for k,p in paths.items()},
         shared_segmenter=dict(checkpoint=str(args.segmenter_checkpoint), sha256=file_digest(args.segmenter_checkpoint),
                               model_config=shared_config, frozen=True), methods=method_records,
+        typography=dict(metric_font=score_font.get_name(), metric_font_sha256=file_digest(score_font.get_file()),
+                        panel_titles="model names without implementation or authorship suffixes"),
         software=dict(torch=torch.__version__, device=str(device)))
     write_json(output/"figure7_metrics.json", record)
     write_csv(output/"figure7_metrics.csv", csv_rows)
-    save_figure(panels, plot_records, args.roi, aspect, output)
+    save_figure(panels, plot_records, args.roi, aspect, output, score_font)
     caption = (f"Fig. 7. Road-region segmentation on validation sample {sample}. "
         "The dehazing methods use one shared, frozen LiteAttentionUNet. "
         f"Full-image mIoU and mDice are computed at {args.resize[0]} x {args.resize[1]} from hard labels, "

@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from matplotlib import font_manager
 from PIL import Image
 import torch
 
@@ -43,7 +44,8 @@ class SegmentationFigureTests(unittest.TestCase):
                 checkpoints.append(str(checkpoint))
             args = parse_args(["--checkpoint", *reversed(checkpoints), "--segmenter-checkpoint", str(root/"coloraware.pth"),
                 "--data-root", str(root/"data"), "--output", str(root/"figure"), "--include-dcp",
-                "--resize", "32", "48", "--device", "cpu", "--threads", "2"])
+                "--resize", "32", "48", "--device", "cpu", "--threads", "2",
+                "--metric-font", font_manager.findfont("DejaVu Serif")])
             with patch("dehaze_seg.visualization.segmentation.save_figure") as render:
                 record = generate(args)
             self.assertEqual(record["sample"], split["val"][0])

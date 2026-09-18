@@ -511,7 +511,9 @@ Sample `003` is the first ID in the supplied historical checkpoints' validation 
 
 Scores are **mIoU / mDice**, computed from the same full 512×512 hard masks, including background and foreground. They are generated directly from the metric records. The red-box enlargements are illustrative and do not change the scoring region. Display panels preserve the original aspect ratio. `--roi X0 Y0 X1 Y1` sets one normalized crop for every panel. All prediction/target masks, confusion matrices, checkpoint/input hashes, CSV/JSON records and the caption accompany `figure7.png` (300 dpi) and `figure7.pdf`.
 
-The historical DCP checkpoint contains the repository's enhanced DCP implementation and is labelled accordingly. To compare **classical parameter-free DCP** instead, remove the DCP checkpoint from the command and add `--include-dcp`; the other five checkpoints are still required. Missing weights are never replaced with old labels or scores. Generated figures and local weights remain ignored by Git; the generation code is included in the repository.
+Panel titles show model names only. Metric numbers and `mIoU / mDice` use **Times New Roman**. If the font is not installed (for example on Linux), pass `--metric-font /path/to/times.ttf`; missing fonts produce an explicit error.
+
+The historical DCP checkpoint contains the repository's enhanced DCP implementation; its details remain in the caption and JSON/CSV records. To compare **classical parameter-free DCP** instead, remove the DCP checkpoint from the command and add `--include-dcp`; the other five checkpoints are still required. Missing weights are never replaced with old labels or scores. Generated figures and local weights remain ignored by Git; the generation code is included in the repository.
 
 ## Project structure
 
@@ -539,9 +541,9 @@ The package provides `train`, `predict`, `evaluate`, `ablate` and `visualize` th
 python -m unittest discover -s tests -v
 ```
 
-**22 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation, classical DCP segmentation and learned DCP restoration/joint training. The joint DCP test also verifies that segmentation loss reaches the dehazing refinement head. Tests do not download datasets or VGG weights.
+**28 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation, classical DCP segmentation and learned DCP restoration/joint training. The joint DCP test also verifies that segmentation loss reaches the dehazing refinement head. Figure tests check all six methods, missing-weight rejection, JSON-safe model configurations, and agreement between saved masks, confusion matrices and plotted scores. Tests do not download datasets or VGG weights.
 
-Additional local checks verified the 185 road triplets, a small three-stage training run, prediction/evaluation/ablation/visualization workflows, and inference with an existing historical checkpoint. **CUDA execution and full paper training were not validated.** No reproduction scores are claimed here.
+Additional local checks verified the 185 road triplets, a small three-stage training run, and prediction/evaluation/ablation/visualization workflows. All six historical road checkpoints were strictly loaded and evaluated on their 28-image validation split using both their own segmenters and one common frozen segmenter. Recomputed own-segmenter mIoU/mDice differed from saved values by less than 0.000018. Two validation IDs shared clear references with training; a separate 26-image subset was also reported. These checks validate the supplied checkpoints, without establishing an independent test set or reproducing every paper table. **CUDA execution and full paper training were not validated.**
 
 ## FAQ
 
