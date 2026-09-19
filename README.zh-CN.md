@@ -138,7 +138,7 @@ python -m pip install -e .
 | 论文云端硬件 | 1 张 32 GB vGPU、16 个 Intel Xeon Platinum 8352V vCPU、62 GB RAM |
 | CPU 回归验证 | Windows、Python 3.12、PyTorch 2.8.0+cpu、torchvision 0.23.0 |
 
-上述 GPU 配置来自论文记录。本次仓库整理的检查使用本机 CPU 环境，未重新验证 CUDA 运行和完整论文训练。依赖范围用于安装解析，不表示所有版本组合均经过测试。
+上述软件配置来自论文记录。本机 CPU 用于回归检查；后续已在 RTX 3080 Ti、PyTorch 2.3.0+cu121 上核验 CUDA 推理，未重新执行完整训练。依赖范围用于安装解析，不表示所有版本组合均经过测试。
 
 </details>
 
@@ -223,7 +223,7 @@ datasets/
 | `grid` | 仓库中的 GridDehazeNet 实现 |
 | `psd` | 仓库中的 PSDDehazeNet 实现 |
 
-论文第 4.1.5 节的下游比较要求各去雾方法**共用同一个冻结的 LiteAttentionUNet 权重**，不针对各方法单独微调分割器；通过 `--segmenter-checkpoint` 执行此协议。神经网络对比模型沿用本仓库实现，不宣称与原作者官方代码、权重或结果完全一致。公开名称统一为 `dcp`：训练默认使用可学习细化扩展，不传权重推理时使用经典恢复，历史权重保持原实现。结果分别标记为 `learned-refinement`、`classical` 和 `historical-enhanced`。论文中应将可训练扩展作为可学习 DCP 变体报告。
+联合模型比较使用各方法**同一份 joint 权重中的去雾器和自带 LiteAttentionUNet**。如需单独开展共用分割器比较，通过 `--segmenter-checkpoint` 指定统一冻结权重，并将该协议的结果单独报告。神经网络对比模型沿用本仓库实现，不宣称与原作者官方代码、权重或结果完全一致。公开名称统一为 `dcp`：训练默认使用可学习细化扩展，不传权重推理时使用经典恢复，历史权重保持原实现。结果分别标记为 `learned-refinement`、`classical` 和 `historical-enhanced`。论文中应将可训练扩展作为可学习 DCP 变体报告。
 
 ### 论文主配置
 
@@ -343,7 +343,7 @@ python train.py --model dcp --dcp-mode classical --dataset paired-road --data-ro
 
 此可选模式仅训练分割器，轮数为 `pretrain-seg-epochs + finetune-epochs`（默认 40）；不使用去雾预训练，也无需 VGG。该模式的旧权重仍按固定经典 DCP 加载。新的联合实验应使用新输出目录并重新训练。
 
-联合训练属于额外的可学习 DCP 实验。执行论文的共用分割器比较时，仍应按下方命令为所有去雾方法指定**同一个** `--segmenter-checkpoint`；各方法单独训练分割器属于不同实验。
+联合训练属于额外的可学习 DCP 实验。图 7 使用各自联合权重中的分割器。另做共用分割器比较时，按下方命令指定**同一个** `--segmenter-checkpoint`，并与联合模型结果分开报告。
 
 <details>
 <summary><strong>神经网络去雾训练：SOTS 格式数据与增强 HSTS</strong></summary>
@@ -440,7 +440,7 @@ python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/bes
 
 ### 多模型比较
 
-按照论文第 4.1.5 节的共用冻结分割器协议比较多个去雾模型，生成各自结果、汇总表和对比拼图：
+以下为可选的共用冻结分割器比较，与图 7 的完整联合模型协议分别报告：
 
 ```bash
 python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/best.pth runs/comparison/paired-road/c2pnet/best.pth --include-dcp --segmenter-checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --save-images --output results/comparison
@@ -507,7 +507,7 @@ python -m dehaze_seg ablate --data-root datasets --experiments attention_none,at
 | 表 6 attention / SE | 已注册四种组合。表中 5.878 / 5.944 / 6.097 / 6.164 M 对应**联合模型**参数量，不是单独分割器；当前每个变体执行完整三阶段训练。 |
 | 消融汇总 | `ablation_summary.csv` 记录末轮验证指标，不是重新评估 `best.pth` 的结果；每阶段从前阶段末轮参数继续训练。 |
 
-论文尚未完整说明注意力实验的训练预算、冻结范围和全部模型选择设置；声称数值复现前，需要对照原始日志确认。训练器各阶段记录活动损失，在仅训练分割器时不会额外记录去雾训练损失，因此仅凭当前 CSV 不能完整重绘图 6(a)。CPU 回归检查已覆盖订正流程；尚未重新验证 CUDA、完整训练及论文报告的成绩。
+论文尚未完整说明注意力实验的训练预算、冻结范围和全部模型选择设置；声称数值复现前，需要对照原始日志确认。训练器各阶段记录活动损失，在仅训练分割器时不会额外记录去雾训练损失，因此仅凭当前 CSV 不能完整重绘图 6(a)。CPU 回归检查已覆盖订正流程，六个道路模型另通过 CUDA 推理核验；未重新执行完整训练及全部论文实验。
 
 ### 可视化
 
@@ -523,10 +523,10 @@ python -m dehaze_seg visualize introduction --data-root datasets --sample 001 --
 ### 重新生成分割对比图（图 7）
 
 ```bash
-python generate_figure7.py --checkpoint ckpt_datasets_joint/dcp/best.pth ckpt_datasets_joint/ffanet/best.pth ckpt_datasets_joint/grid/best.pth ckpt_datasets_joint/psd/best.pth ckpt_datasets_joint/coloraware/best.pth ckpt_datasets_joint/c2pnet/best.pth --segmenter-checkpoint ckpt_datasets_joint/coloraware/best.pth --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
+python generate_figure7.py --segmentation-protocol joint --checkpoint ckpt_datasets_joint/dcp/joint/best.pth ckpt_datasets_joint/ffanet/joint/best.pth ckpt_datasets_joint/grid/joint/best.pth ckpt_datasets_joint/psd/joint/best.pth ckpt_datasets_joint/coloraware/joint/best.pth ckpt_datasets_joint/c2pnet/joint/best.pth --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
 ```
 
-该命令生成**八栏**：雾图、DCP、FFA-Net、GridDehazeNet、PSD、ColorAwareUNet、C2PNet 和 GT。六种去雾结果共用同一个冻结分割器。脚本要求六种方法齐全，缺少权重时在推理前报错，不生成不完整的图 7。以上路径对应历史实验目录，请按实际权重位置修改；`python -m dehaze_seg visualize segmentation` 提供相同入口。没有可用 CUDA 时使用 `--device cpu`。
+该命令生成**八栏**：雾图、DCP、FFA-Net、GridDehazeNet、PSD、ColorAwareUNet、C2PNet 和 GT。每种方法使用其 **joint/best 完整联合权重及自带分割器**。脚本要求六种方法齐全，缺少权重时在推理前报错，不生成不完整的图 7。以上路径对应历史实验目录，请按实际权重位置修改；`python -m dehaze_seg visualize segmentation` 提供相同入口。没有可用 CUDA 时使用 `--device cpu`。
 
 `003` 是所给历史权重验证划分中的首个 ID。换用其他权重时，省略 `--sample` 可采用该权重的首个验证 ID，或指定其保存划分中的样本。程序拒绝训练样本及已知参考图重叠。该图是单个验证样本示例，不是独立测试集成绩，也不表示复现了表 1。
 
@@ -534,7 +534,7 @@ python generate_figure7.py --checkpoint ckpt_datasets_joint/dcp/best.pth ckpt_da
 
 图中标题仅保留模型名称。指标数字及 `mIoU / mDice` 使用 **Times New Roman（新罗马）**。Linux 等环境若未安装该字体，可传入 `--metric-font /path/to/times.ttf`；字体缺失时会明确报错。
 
-历史 DCP 权重对应仓库中的增强实现，具体版本保留在图注及 JSON/CSV 记录中。若需比较**无需权重的经典 DCP**，从命令中移除 DCP 权重路径并添加 `--include-dcp`，其余五个权重仍必须提供。不会用旧图标注或分数补齐缺失权重。生成图片及本地权重保持 Git 忽略，生成代码纳入公开仓库。
+历史 DCP 权重对应仓库中的增强实现，具体版本保留在图注及 JSON/CSV 记录中。如需另做共用分割器实验，显式传入 `--segmentation-protocol shared-frozen --segmenter-checkpoint PATH`；只有该协议支持移除 DCP 权重并使用 `--include-dcp` 加入**无需权重的经典 DCP**，其余五个权重仍须提供。joint 模式会拒绝共用分割器选项，避免意外替换配套分割器。不会用旧图标注或分数补齐缺失权重。生成图片及本地权重保持 Git 忽略，生成代码纳入公开仓库。
 
 <a id="project-structure"></a>
 
@@ -566,9 +566,9 @@ tests/               # CPU 回归检查
 python -m unittest discover -s tests -v
 ```
 
-在[安装说明](#installation)列出的本机环境中，**28 项 CPU 回归测试通过**，覆盖模型前向、只放大增益的实际学习、attention/SE 变体、数据配对、同步增强、阶段冻结、参数更新、严格权重往返加载、场景隔离、共用冻结分割器、经典 DCP 分割训练，以及可学习 DCP 去雾/联合训练。联合 DCP 测试还验证了分割损失能够传回去雾细化头。图 7 测试覆盖六种方法齐全、缺失权重报错、模型配置可序列化，以及保存掩码、混淆矩阵和图中分数一致。测试不会下载数据或 VGG 权重。
+在[安装说明](#installation)列出的本机环境中，**29 项 CPU 回归测试通过**，覆盖模型前向、只放大增益的实际学习、attention/SE 变体、数据配对、同步增强、阶段冻结、参数更新、严格权重往返加载、场景隔离、共用冻结分割器、经典 DCP 分割训练，以及可学习 DCP 去雾/联合训练。联合 DCP 测试还验证了分割损失能够传回去雾细化头。图 7 测试覆盖六种方法齐全、缺失权重报错、模型配置可序列化，以及保存掩码、混淆矩阵和图中分数一致。测试不会下载数据或 VGG 权重。
 
-另已检查 185 组道路三元组、小样本三阶段训练和推理/评估/消融/可视化流程。六个历史道路模型均通过严格加载，并在原 28 张验证图上分别核验自身分割器与同一个冻结分割器的结果；重算的自身 mIoU/mDice 与权重记录相差均小于 0.000018。其中两张验证图与训练集共用清晰参考，另行报告了排除它们后的 26 张子集。上述检查验证了所给权重，不代表建立了独立测试集或复现全部论文表格。**尚未验证 CUDA 运行与论文完整训练。**
+另已检查 185 组道路三元组、小样本三阶段训练和推理/评估/消融/可视化流程。六个历史道路模型均通过严格加载，并在原 28 张验证图上分别核验自身分割器与同一个冻结分割器的结果；重算的自身 mIoU/mDice 与权重记录相差均小于 0.000018。其中两张验证图与训练集共用清晰参考，另行报告了排除它们后的 26 张子集。上述检查验证了所给权重，不代表建立了独立测试集或复现全部论文表格。后续已在 RTX 3080 Ti（PyTorch 2.3.0+cu121）上核验 18 份阶段权重的历史验证集与两种推理尺寸；图 7 默认采用各自完整 joint best 模型。尚未重新执行完整训练。
 
 <a id="faq"></a>
 

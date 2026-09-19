@@ -132,7 +132,7 @@ Run the smaller example under [training](#training) with `--device cpu`. This is
 | Paper cloud hardware | One 32 GB vGPU · 16 Intel Xeon Platinum 8352V vCPUs · 62 GB RAM |
 | Local CPU regression checks | Windows · Python 3.12 · PyTorch 2.8.0+cpu · torchvision 0.23.0 |
 
-The GPU configuration above is taken from the manuscript. The checks performed during this repository cleanup used the local CPU environment; CUDA execution and complete experimental reproduction were not revalidated here. Dependency ranges do not mean every version combination was tested.
+The software configuration above is taken from the manuscript. Local regression tests use the CPU environment; a subsequent RTX 3080 Ti audit also verified CUDA inference with PyTorch 2.3.0+cu121. Full training was not rerun. Dependency ranges do not mean every version combination was tested.
 
 </details>
 
@@ -214,7 +214,7 @@ These are the original figures embedded in the supplied manuscript. Click either
 | `grid` | GridDehazeNet implementation in this repository |
 | `psd` | PSDDehazeNet implementation in this repository |
 
-All road experiments use **LiteAttentionUNet** for segmentation. Section 4.1.5 of the manuscript evaluates different dehazers using **one shared, frozen LiteAttentionUNet checkpoint**, without method-specific segmentation fine-tuning. Use `--segmenter-checkpoint` for this protocol. Neural baselines retain this repository's implementations; equivalence to the original authors' code, weights or scores is not claimed. The public name is always `dcp`: training defaults to a learned refinement extension, checkpoint-free inference uses classical recovery, and historical checkpoints retain their original implementation. Results distinguish `learned-refinement`, `classical` and `historical-enhanced`. Report the trainable extension as a learned DCP variant when using it in the paper.
+All road experiments use **LiteAttentionUNet** for segmentation. The joint comparison uses **each method's own trained LiteAttentionUNet** from the same joint checkpoint as its dehazer. A separate shared-evaluator comparison is available through `--segmenter-checkpoint`; its results must be labelled separately. Neural baselines retain this repository's implementations; equivalence to the original authors' code, weights or scores is not claimed. The public name is always `dcp`: training defaults to a learned refinement extension, checkpoint-free inference uses classical recovery, and historical checkpoints retain their original implementation. Results distinguish `learned-refinement`, `classical` and `historical-enhanced`. Report the trainable extension as a learned DCP variant when using it in the paper.
 
 ### Paper configuration
 
@@ -428,7 +428,7 @@ Per-image results (including per-class IoU/Dice) are saved in `metrics.csv`, agg
 
 ### Compare checkpoints
 
-Compare dehazers under the shared frozen-segmenter protocol of Section 4.1.5:
+Optional shared-evaluator comparison (separate from the complete joint models used in Figure 7):
 
 ```bash
 python -m dehaze_seg evaluate --checkpoint runs/paper/paired-road/coloraware/best.pth runs/comparison/paired-road/c2pnet/best.pth --include-dcp --segmenter-checkpoint runs/paper/paired-road/coloraware/best.pth --dataset paired-road --data-root datasets --split val --save-images --output results/comparison
@@ -486,7 +486,7 @@ Additional registered experiments cover training strategy, loss, capacity, augme
 | Table 6 attention / SE | The four combinations are registered. The table's 5.878 / 5.944 / 6.097 / 6.164 M values match **joint-model** parameter counts, not the segmenter alone. The current runner uses the full staged schedule for each variant. |
 | Ablation summary | `ablation_summary.csv` reports final-epoch validation metrics, not a re-evaluation of `best.pth`. Each stage continues from the preceding stage's last weights. |
 
-The manuscript does not fully specify the attention experiment's training budget and frozen branches, or all model-selection settings. Confirm these against the original logs before claiming numerical reproduction. The trainer records active losses at each stage; it does not record the inactive restoration training loss during segmentation-only training, so its CSV alone cannot fully redraw Figure 6(a). CPU regression checks cover the corrected workflows; CUDA runs, full training and the paper's reported scores have not been revalidated.
+The manuscript does not fully specify the attention experiment's training budget and frozen branches, or all model-selection settings. Confirm these against the original logs before claiming numerical reproduction. The trainer records active losses at each stage; it does not record the inactive restoration training loss during segmentation-only training, so its CSV alone cannot fully redraw Figure 6(a). CPU regression checks cover the corrected workflows, and CUDA inference has been audited on the six road models. Full training and all paper experiments have not been rerun.
 
 ### Visualization
 
@@ -502,10 +502,10 @@ Gain/component visualization requires a joint ColorAwareUNet checkpoint. The int
 ### Regenerate the segmentation comparison (Figure 7)
 
 ```bash
-python generate_figure7.py --checkpoint ckpt_datasets_joint/dcp/best.pth ckpt_datasets_joint/ffanet/best.pth ckpt_datasets_joint/grid/best.pth ckpt_datasets_joint/psd/best.pth ckpt_datasets_joint/coloraware/best.pth ckpt_datasets_joint/c2pnet/best.pth --segmenter-checkpoint ckpt_datasets_joint/coloraware/best.pth --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
+python generate_figure7.py --segmentation-protocol joint --checkpoint ckpt_datasets_joint/dcp/joint/best.pth ckpt_datasets_joint/ffanet/joint/best.pth ckpt_datasets_joint/grid/joint/best.pth ckpt_datasets_joint/psd/joint/best.pth ckpt_datasets_joint/coloraware/joint/best.pth ckpt_datasets_joint/c2pnet/joint/best.pth --data-root datasets --sample 003 --resize 512 512 --output results/figure7 --device cuda
 ```
 
-This generates **eight columns**: hazy input, DCP, FFA-Net, GridDehazeNet, PSD, ColorAwareUNet and C2PNet, followed by ground truth. All six dehazers use the same frozen segmenter. The script requires all six methods and fails before inference if any checkpoint is missing; it never produces a partial Figure 7. The paths above describe the historical experiment directory; replace them with your actual weights. `python -m dehaze_seg visualize segmentation` provides the same interface. Use `--device cpu` if CUDA is unavailable.
+This generates **eight columns**: hazy input, DCP, FFA-Net, GridDehazeNet, PSD, ColorAwareUNet and C2PNet, followed by ground truth. Each method uses its complete **joint/best** checkpoint and its own segmenter. The script requires all six methods and fails before inference if any checkpoint is missing; it never produces a partial Figure 7. The paths above describe the historical experiment directory; replace them with your actual weights. `python -m dehaze_seg visualize segmentation` provides the same interface. Use `--device cpu` if CUDA is unavailable.
 
 Sample `003` is the first ID in the supplied historical checkpoints' validation split. For other checkpoints, omit `--sample` to use their first validation ID, or select an ID from their saved split. Training samples and known reference overlap are rejected. This is a single validation example, not an independent test set or a reproduction of Table 1.
 
@@ -513,7 +513,7 @@ Scores are **mIoU / mDice**, computed from the same full 512×512 hard masks, in
 
 Panel titles show model names only. Metric numbers and `mIoU / mDice` use **Times New Roman**. If the font is not installed (for example on Linux), pass `--metric-font /path/to/times.ttf`; missing fonts produce an explicit error.
 
-The historical DCP checkpoint contains the repository's enhanced DCP implementation; its details remain in the caption and JSON/CSV records. To compare **classical parameter-free DCP** instead, remove the DCP checkpoint from the command and add `--include-dcp`; the other five checkpoints are still required. Missing weights are never replaced with old labels or scores. Generated figures and local weights remain ignored by Git; the generation code is included in the repository.
+The historical DCP checkpoint contains the repository's enhanced DCP implementation; its details remain in the caption and JSON/CSV records. For a separate shared-evaluator experiment, use `--segmentation-protocol shared-frozen --segmenter-checkpoint PATH`. Only that protocol accepts **classical parameter-free DCP** via `--include-dcp` in place of its checkpoint. The other five checkpoints are still required. Joint mode rejects shared-segmenter options to prevent accidental replacement. Missing weights are never replaced with old labels or scores. Generated figures and local weights remain ignored by Git; the generation code is included in the repository.
 
 ## Project structure
 
@@ -541,9 +541,9 @@ The package provides `train`, `predict`, `evaluate`, `ablate` and `visualize` th
 python -m unittest discover -s tests -v
 ```
 
-**28 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation, classical DCP segmentation and learned DCP restoration/joint training. The joint DCP test also verifies that segmentation loss reaches the dehazing refinement head. Figure tests check all six methods, missing-weight rejection, JSON-safe model configurations, and agreement between saved masks, confusion matrices and plotted scores. Tests do not download datasets or VGG weights.
+**29 CPU regression tests passed** in the local environment listed under [installation](#installation). They cover model forwards, learnable amplify-only gain, attention/SE variants, pairing, synchronized transforms, stage freezing, parameter updates, strict checkpoint round trips, scene isolation, shared frozen segmentation, classical DCP segmentation and learned DCP restoration/joint training. The joint DCP test also verifies that segmentation loss reaches the dehazing refinement head. Figure tests check all six methods, missing-weight rejection, JSON-safe model configurations, and agreement between saved masks, confusion matrices and plotted scores. Tests do not download datasets or VGG weights.
 
-Additional local checks verified the 185 road triplets, a small three-stage training run, and prediction/evaluation/ablation/visualization workflows. All six historical road checkpoints were strictly loaded and evaluated on their 28-image validation split using both their own segmenters and one common frozen segmenter. Recomputed own-segmenter mIoU/mDice differed from saved values by less than 0.000018. Two validation IDs shared clear references with training; a separate 26-image subset was also reported. These checks validate the supplied checkpoints, without establishing an independent test set or reproducing every paper table. **CUDA execution and full paper training were not validated.**
+Additional local checks verified the 185 road triplets, a small three-stage training run, and prediction/evaluation/ablation/visualization workflows. All six historical road checkpoints were strictly loaded and evaluated on their 28-image validation split using both their own segmenters and one common frozen segmenter. Recomputed own-segmenter mIoU/mDice differed from saved values by less than 0.000018. Two validation IDs shared clear references with training; a separate 26-image subset was also reported. These checks validate the supplied checkpoints, without establishing an independent test set or reproducing every paper table. A subsequent server audit on an RTX 3080 Ti (PyTorch 2.3.0+cu121) strictly loaded all six original joint models, evaluated 18 stage checkpoints on the historical 28-image validation split, and compared 512×512 and native-size outputs. Figure 7 now defaults to each model's own joint segmenter; shared-frozen evaluation remains an explicit separate protocol. Full paper training has not been rerun.
 
 ## FAQ
 

@@ -30,13 +30,15 @@ PAPER_MODELS = ("dcp", "ffanet", "grid", "psd", "coloraware", "c2pnet")
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Generate the complete six-model Figure 7 from actual experiment weights")
     parser.add_argument("--checkpoint", nargs="+", required=True,
-                        help="FFA-Net, GridDehazeNet, PSD, ColorAwareUNet, C2PNet weights; optionally learned DCP weights")
-    parser.add_argument("--segmenter-checkpoint", required=True, help="One frozen joint checkpoint's segmenter for all methods")
+                        help="Six complete joint checkpoints; shared-frozen also accepts restoration-only weights")
+    parser.add_argument("--segmentation-protocol", choices=("joint", "shared-frozen"), default="joint",
+                        help="joint keeps each checkpoint's segmenter; shared-frozen replaces them with one evaluator")
+    parser.add_argument("--segmenter-checkpoint", help="Required only for shared-frozen comparison")
     parser.add_argument("--legacy-profile", choices=PROFILES)
     parser.add_argument("--segmenter-legacy-profile", choices=PROFILES)
-    parser.add_argument("--include-dcp", action="store_true", help="Add the parameter-free classical DCP baseline")
+    parser.add_argument("--include-dcp", action="store_true", help="Add classical DCP in shared-frozen mode only")
     parser.add_argument("--data-root", default="datasets")
-    parser.add_argument("--split-file", help="Saved validation split; defaults to the shared segmenter's split")
+    parser.add_argument("--split-file", help="Saved validation split; otherwise use the first joint checkpoint or shared evaluator")
     parser.add_argument("--sample", help="Validation sample ID; defaults to the first saved validation ID")
     parser.add_argument("--resize", type=int, nargs=2, default=[512, 512], metavar=("H", "W"))
     parser.add_argument("--roi", type=float, nargs=4, default=[.20, .56, .75, .90],
@@ -46,6 +48,10 @@ def parse_args(argv=None):
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--metric-font", help="Path to a Times New Roman TTF/OTF file; otherwise use the installed font")
     args = parser.parse_args(argv)
+    if args.segmentation_protocol == "shared-frozen" and not args.segmenter_checkpoint:
+        parser.error("shared-frozen requires --segmenter-checkpoint")
+    if args.segmentation_protocol == "joint" and (args.segmenter_checkpoint or args.segmenter_legacy_profile or args.include_dcp):
+        parser.error("joint requires six complete joint checkpoints; shared-segmenter and classical DCP options require --segmentation-protocol shared-frozen")
     # Multiples of 16 avoid padding changing the training validation grid.
     if any(n < 32 or n % 16 for n in args.resize) or args.threads < 1:
         parser.error("resize must use multiples of 16 >= 32; threads must be positive")
@@ -65,6 +71,9 @@ def figure_sources(args):
         # Strict CPU loading validates both the identifier and architecture. Drop
         # each model immediately so the preflight does not retain six networks.
         model, config, checkpoint = load_checkpoint(checkpoint_path, "cpu", args.legacy_profile)
+        if args.segmentation_protocol == "joint" and (
+                not isinstance(model, JointDehazeSegModel) or config["segmenter"]["num_classes"] != 2):
+            raise ValueError(f"Joint Figure 7 requires a binary joint checkpoint: {checkpoint_path}")
         name = config["model"]
         del model, checkpoint
         if name in sources:
@@ -140,24 +149,32 @@ def generate(args):
     sources = figure_sources(args)
     score_font = metric_font(args.metric_font)
     device = select_device(args.device)
-    shared, shared_config, shared_checkpoint = load_checkpoint(
-        args.segmenter_checkpoint, device, args.segmenter_legacy_profile)
-    if not isinstance(shared, JointDehazeSegModel) or shared_config["segmenter"]["num_classes"] != 2:
+    use_shared = args.segmentation_protocol == "shared-frozen"
+    anchor_path = args.segmenter_checkpoint if use_shared else sources[0]
+    anchor, anchor_config, anchor_checkpoint = load_checkpoint(
+        anchor_path, device, args.segmenter_legacy_profile if use_shared else args.legacy_profile)
+    if not isinstance(anchor, JointDehazeSegModel) or anchor_config["segmenter"]["num_classes"] != 2:
         raise ValueError("Figure generation requires a binary joint segmentation checkpoint")
-    shared.requires_grad_(False)
-    shared.dehazer = torch.nn.Identity()
-    saved = shared_checkpoint.get("train_config", shared_checkpoint.get("args", {}))
-    if (not args.split_file and checkpoint_split(args.segmenter_checkpoint, shared_checkpoint) is None
+    shared_info = None
+    if use_shared:
+        shared = anchor.requires_grad_(False)
+        shared.dehazer = torch.nn.Identity()
+        shared_info = dict(checkpoint=str(anchor_path), sha256=file_digest(anchor_path),
+                           model_config=anchor_config, frozen=True)
+    else:
+        del anchor
+    saved = anchor_checkpoint.get("train_config", anchor_checkpoint.get("args", {}))
+    if (not args.split_file and checkpoint_split(anchor_path, anchor_checkpoint) is None
             and not {"seed", "val_ratio"} <= saved.keys()):
         raise ValueError("No saved validation split or seed/ratio; supply an explicit --split-file")
     root = Path(args.data_root)
-    selected = select_split(list_images(root/"hazy"), args, args.segmenter_checkpoint, shared_checkpoint)
+    selected = select_split(list_images(root/"hazy"), args, anchor_path, anchor_checkpoint)
     sample = args.sample or selected[0].stem
     if sample not in {p.stem for p in selected}:
         raise ValueError(f"{sample} is outside the selected validation split; choose a validation sample")
-    overlap = training_overlap("paired-road", root, [sample], args.segmenter_checkpoint, shared_checkpoint)
+    overlap = training_overlap("paired-road", root, [sample], anchor_path, anchor_checkpoint)
     if overlap:
-        raise ValueError(f"Sample {sample} overlaps shared-segmenter training references; choose another validation sample")
+        raise ValueError(f"Sample {sample} overlaps checkpoint training references; choose another validation sample")
     paths = {name: find_by_stem(root/name, sample) for name in ("hazy", "clear", "masks")}
     if any(p is None for p in paths.values()):
         raise ValueError(f"Missing triplet for {sample}")
@@ -189,11 +206,14 @@ def generate(args):
                 label += {"learned-dcp": " (learned)", "legacy-dcp": " (historical)"}.get(
                     config.get("dehazer_type"), " (classical)")
             digest = file_digest(checkpoint_path)
-        model = use_shared_segmenter(model, shared)
+        if use_shared:
+            model = use_shared_segmenter(model, shared)
         restored, logits, _ = infer_image(model, hazy, device, args.resize, return_to_original=False)
         labels = logits.argmax(1).cpu()
         cm = confusion_matrix(labels, target, 2)
         metrics = segmentation_metrics(cm)
+        if metrics["mdice"] + 1e-7 < metrics["miou"]:
+            raise RuntimeError("Inconsistent hard-mask macro metrics: mDice must be >= mIoU")
         mask_name = f"{i+1:02d}_{config['model']}_mask.png"
         rgb_name = f"{i+1:02d}_{config['model']}_dehazed.png"
         Image.fromarray(labels[0].numpy().astype(np.uint8)).save(output/mask_name)
@@ -202,7 +222,8 @@ def generate(args):
         panels.append((label, overlay(rgb, labels[0].numpy())))
         plot_records.append(metrics)
         method_records.append(dict(label=label, model_config=config, checkpoint=str(checkpoint_path) if checkpoint_path else None,
-            checkpoint_sha256=digest, prediction_mask=mask_name, dehazed_image=rgb_name,
+            checkpoint_sha256=digest, segmentation_protocol=args.segmentation_protocol,
+            prediction_mask=mask_name, dehazed_image=rgb_name,
             confusion_matrix=cm.tolist(), metrics=metrics))
         csv_rows.append(dict(sample=sample, method=label, **segmentation_metric_row(metrics)))
         del model, logits, restored
@@ -214,8 +235,7 @@ def generate(args):
         resize=args.resize, metric_resolution="inference", display_aspect=aspect, roi=args.roi,
         metric_definition="Hard argmax; mean over background and foreground; full grid, not ROI; absent classes zero; eps=1e-6",
         target_mask="target_mask.png", sources={k:dict(file=p.name, sha256=file_digest(p)) for k,p in paths.items()},
-        shared_segmenter=dict(checkpoint=str(args.segmenter_checkpoint), sha256=file_digest(args.segmenter_checkpoint),
-                              model_config=shared_config, frozen=True), methods=method_records,
+        segmentation_protocol=args.segmentation_protocol, shared_segmenter=shared_info, methods=method_records,
         typography=dict(metric_font=score_font.get_name(), metric_font_sha256=file_digest(score_font.get_file()),
                         panel_titles="model names without implementation or authorship suffixes"),
         software=dict(torch=torch.__version__, device=str(device)))
@@ -223,7 +243,8 @@ def generate(args):
     write_csv(output/"figure7_metrics.csv", csv_rows)
     save_figure(panels, plot_records, args.roi, aspect, output, score_font)
     caption = (f"Fig. 7. Road-region segmentation on validation sample {sample}. "
-        "The dehazing methods use one shared, frozen LiteAttentionUNet. "
+        + ("Each method uses its complete joint checkpoint, including its own LiteAttentionUNet. "
+           if not use_shared else "The dehazing methods use one shared, frozen LiteAttentionUNet. ") +
         f"Full-image mIoU and mDice are computed at {args.resize[0]} x {args.resize[1]} from hard labels, "
         "averaged over background and foreground. Red shading denotes the foreground; "
         "the bottom row enlarges the red boxes. Display panels preserve the source aspect ratio. "
