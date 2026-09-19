@@ -92,6 +92,21 @@ class SegmentationFigureTests(unittest.TestCase):
                 self.assertAlmostEqual(iou.mean(), method["metrics"]["miou"], places=6)
                 self.assertAlmostEqual(dice.mean(), method["metrics"]["mdice"], places=6)
                 self.assertGreaterEqual(method["metrics"]["mdice"], method["metrics"]["miou"])
+            # An explicitly requested training illustration keeps its provenance.
+            joint_args.sample = split["train"][0]
+            joint_args.split = "train"
+            joint_args.allow_training_overlap = True
+            joint_args.native_resolution = True
+            joint_args.resize = None
+            joint_args.output = str(root/"training_figure")
+            with patch("dehaze_seg.visualization.segmentation.save_figure"):
+                diagnostic = generate(joint_args)
+            self.assertEqual(diagnostic["split"], "train")
+            self.assertTrue(diagnostic["qualitative_diagnostic"])
+            self.assertTrue(diagnostic["native_resolution"])
+            self.assertIn(joint_args.sample, diagnostic["known_training_overlap"])
+            self.assertEqual(diagnostic["resize"], [32, 48])
+            self.assertIn("not held-out evaluation", (root/"training_figure/caption.txt").read_text())
             args.sample = split["train"][0]
             with self.assertRaisesRegex(ValueError, "outside the selected validation"):
                 generate(args)
@@ -107,6 +122,8 @@ class SegmentationFigureTests(unittest.TestCase):
             parse_args(["--checkpoint", "a.pth", "--segmenter-checkpoint", "b.pth"])
         with self.assertRaises(SystemExit):
             parse_args(["--checkpoint", "a.pth", "--segmentation-protocol", "shared-frozen"])
+        with self.assertRaises(SystemExit):
+            parse_args(["--checkpoint", "a.pth", "--split", "train"])
 
 
 if __name__ == "__main__":

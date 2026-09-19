@@ -528,11 +528,11 @@ python generate_figure7.py --segmentation-protocol joint --checkpoint ckpt_datas
 
 该命令生成**八栏**：雾图、DCP、FFA-Net、GridDehazeNet、PSD、ColorAwareUNet、C2PNet 和 GT。每种方法使用其 **joint/best 完整联合权重及自带分割器**。脚本要求六种方法齐全，缺少权重时在推理前报错，不生成不完整的图 7。以上路径对应历史实验目录，请按实际权重位置修改；`python -m dehaze_seg visualize segmentation` 提供相同入口。没有可用 CUDA 时使用 `--device cpu`。
 
-`003` 是所给历史权重验证划分中的首个 ID。换用其他权重时，省略 `--sample` 可采用该权重的首个验证 ID，或指定其保存划分中的样本。程序拒绝训练样本及已知参考图重叠。该图是单个验证样本示例，不是独立测试集成绩，也不表示复现了表 1。
+`003` 是所给历史权重验证划分中的首个 ID。换用其他权重时，省略 `--sample` 可采用该权重的首个验证 ID，或指定其保存划分中的样本。默认拒绝训练样本及已知参考图重叠。若明确需要训练图定性展示，可传入 `--split train --sample 060 --allow-training-overlap`，图注和 JSON 会标明训练样本诊断。用 `--native-resolution` 替代 `--resize 512 512` 可在原始图像网格直接推理，与原导出流程一致；两种尺寸的指标不能混用。该图是单个验证样本示例，不是独立测试集成绩，也不表示复现了表 1。
 
-图上标注为 **mIoU / mDice**，从同一张完整 512×512 硬标签掩码计算，包含背景与前景，并直接读取本次指标记录生成。红框放大只用于展示，不改变评分区域；展示图片保持原图宽高比。`--roi X0 Y0 X1 Y1` 为所有栏设置相同的归一化裁剪范围。输出包括 300 dpi 的 `figure7.png`、`figure7.pdf`、原始预测/GT 掩码、混淆矩阵、权重与输入哈希、CSV/JSON 指标及图注。
+图上标注为 **mIoU / mDice**，从所选推理分辨率下的同一张完整硬标签掩码计算，包含背景与前景，并直接读取本次指标记录生成。指标位于顶部，上排为完整叠加图，下排为对应红框放大图，底部为模型名称。放大只用于展示，不改变评分区域；展示图片保持原图宽高比。`--roi X0 Y0 X1 Y1` 为所有栏设置相同的归一化裁剪范围，默认值为 `0.30 0.48 0.70 0.77`。输出包括 300 dpi 的 `figure7.png`、`figure7.pdf`、原始预测/GT 掩码、混淆矩阵、权重与输入哈希、CSV/JSON 指标及图注。
 
-图中标题仅保留模型名称。指标数字及 `mIoU / mDice` 使用 **Times New Roman（新罗马）**。Linux 等环境若未安装该字体，可传入 `--metric-font /path/to/times.ttf`；字体缺失时会明确报错。
+图中标题仅保留模型名称。标题、指标数字及 `mIoU / mDice` 使用 **Times New Roman（新罗马）**。Linux 等环境若未安装该字体，可传入 `--metric-font /path/to/timesbd.ttf` 使用论文图中的粗体；字体缺失时会明确报错。
 
 历史 DCP 权重对应仓库中的增强实现，具体版本保留在图注及 JSON/CSV 记录中。如需另做共用分割器实验，显式传入 `--segmentation-protocol shared-frozen --segmenter-checkpoint PATH`；只有该协议支持移除 DCP 权重并使用 `--include-dcp` 加入**无需权重的经典 DCP**，其余五个权重仍须提供。joint 模式会拒绝共用分割器选项，避免意外替换配套分割器。不会用旧图标注或分数补齐缺失权重。生成图片及本地权重保持 Git 忽略，生成代码纳入公开仓库。
 

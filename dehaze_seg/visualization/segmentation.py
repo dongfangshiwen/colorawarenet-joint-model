@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 import torch
 
-from ..data.common import find_by_stem, mask_to_label_tensor
+from ..data.common import find_by_stem, mask_to_label_tensor, pil_to_rgb_tensor
 from ..data.splits import checkpoint_split, file_digest, training_overlap
 from ..engine.checkpoint import load_checkpoint, PROFILES
 from ..engine.inference import infer_image, list_images, select_split, use_shared_segmenter
@@ -22,7 +22,7 @@ from ..models.registry import build_model, model_config
 from ..utils import ensure_dir, select_device, write_csv, write_json
 
 
-LABELS = dict(coloraware="ColorAwareUNet (Ours)", dcp="DCP", c2pnet="C2PNet",
+LABELS = dict(coloraware="ColorAwareUNet", dcp="DCP", c2pnet="C2PNet",
               ffanet="FFA-Net", grid="GridDehazeNet", psd="PSD")
 PAPER_MODELS = ("dcp", "ffanet", "grid", "psd", "coloraware", "c2pnet")
 
@@ -39,26 +39,36 @@ def parse_args(argv=None):
     parser.add_argument("--include-dcp", action="store_true", help="Add classical DCP in shared-frozen mode only")
     parser.add_argument("--data-root", default="datasets")
     parser.add_argument("--split-file", help="Saved validation split; otherwise use the first joint checkpoint or shared evaluator")
-    parser.add_argument("--sample", help="Validation sample ID; defaults to the first saved validation ID")
-    parser.add_argument("--resize", type=int, nargs=2, default=[512, 512], metavar=("H", "W"))
-    parser.add_argument("--roi", type=float, nargs=4, default=[.20, .56, .75, .90],
+    parser.add_argument("--split", choices=("val", "train"), default="val")
+    parser.add_argument("--allow-training-overlap", action="store_true",
+                        help="Explicitly allow and label a training-sample or shared-reference diagnostic")
+    parser.add_argument("--sample", help="Sample ID in the selected split; defaults to its first ID")
+    resolution = parser.add_mutually_exclusive_group()
+    resolution.add_argument("--resize", type=int, nargs=2, metavar=("H", "W"))
+    resolution.add_argument("--native-resolution", action="store_true",
+                            help="Use the original image grid directly, matching the original joint-model exporter")
+    parser.add_argument("--roi", type=float, nargs=4, default=[.30, .48, .70, .77],
                         metavar=("X0", "Y0", "X1", "Y1"), help="Normalized crop, identical across all panels")
     parser.add_argument("--output", default="results/figure7")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--metric-font", help="Path to a Times New Roman TTF/OTF file; otherwise use the installed font")
     args = parser.parse_args(argv)
+    if args.split == "train" and not args.allow_training_overlap:
+        parser.error("--split train requires --allow-training-overlap; training figures are qualitative diagnostics")
+    if not args.native_resolution and args.resize is None:
+        args.resize = [512, 512]
     if args.segmentation_protocol == "shared-frozen" and not args.segmenter_checkpoint:
         parser.error("shared-frozen requires --segmenter-checkpoint")
     if args.segmentation_protocol == "joint" and (args.segmenter_checkpoint or args.segmenter_legacy_profile or args.include_dcp):
         parser.error("joint requires six complete joint checkpoints; shared-segmenter and classical DCP options require --segmentation-protocol shared-frozen")
     # Multiples of 16 avoid padding changing the training validation grid.
-    if any(n < 32 or n % 16 for n in args.resize) or args.threads < 1:
+    if (args.resize and any(n < 32 or n % 16 for n in args.resize)) or args.threads < 1:
         parser.error("resize must use multiples of 16 >= 32; threads must be positive")
     x0, y0, x1, y1 = args.roi
     if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
         parser.error("roi must satisfy 0 <= X0 < X1 <= 1 and 0 <= Y0 < Y1 <= 1")
-    args.dataset, args.split = "paired-road", "val"
+    args.dataset = "paired-road"
     return args
 
 
@@ -98,7 +108,8 @@ def metric_font(path=None):
             raise FileNotFoundError(f"Metric font file not found: {path}")
         return font_manager.FontProperties(fname=str(path))
     try:
-        font_path = font_manager.findfont("Times New Roman", fallback_to_default=False)
+        font_path = font_manager.findfont(
+            font_manager.FontProperties(family="Times New Roman", weight="bold"), fallback_to_default=False)
     except ValueError as exc:
         raise ValueError("Times New Roman is required for Figure 7 metrics. Install it or pass "
                          "--metric-font /path/to/times.ttf. No substitute font was used.") from exc
@@ -106,24 +117,42 @@ def metric_font(path=None):
 
 
 def save_figure(panels, records, roi, aspect, output, score_font=None):
-    """Metric labels come directly from the same records saved alongside masks."""
+    """Paper layout: scores, full images, common ROI crops, then model names.
+
+    Both image rows preserve the source aspect ratio. The crop affects only
+    the display; scores still describe the full saved prediction masks.
+    """
     n = len(panels)
     score_font = score_font or metric_font()
-    fig = plt.figure(figsize=(2.1*n, 3.65), dpi=300, facecolor="white")
-    left, gap = .012, .010
-    width = (1 - 2*left - (n-1)*gap)/n
     x0, y0, x1, y1 = roi
+    # Use physical dimensions so rows meet closely without stretching images.
+    panel_width, gap, margin = 2.1, .05, .14
+    main_height = panel_width / aspect
+    crop_height = panel_width / (aspect * (x1-x0) / (y1-y0))
+    bottom, title_height, row_gap, score_height = .08, .34, .05, .30
+    crop_bottom = bottom + title_height
+    main_bottom = crop_bottom + crop_height + row_gap
+    fig_width = 2*margin + n*panel_width + (n-1)*gap
+    fig_height = main_bottom + main_height + score_height + .06
+    fig = plt.figure(figsize=(fig_width, fig_height), dpi=300, facecolor="white")
     for i, (label, rgb) in enumerate(panels):
-        x = left + i*(width+gap)
+        x = (margin + i*(panel_width+gap)) / fig_width
+        width = panel_width / fig_width
         center = x + width/2
-        fig.text(center, .99, label.split(" (", 1)[0], ha="center", va="top",
-                 fontsize=16, fontweight="semibold", linespacing=1.05)
+        title = {"Hazy input": "Hazy Image", "Ground truth": "GT"}.get(label, label.split(" (", 1)[0])
+        fig.text(center, (bottom + title_height*.42)/fig_height, title,
+                 ha="center", va="center", fontsize=16, fontproperties=score_font)
         record = records[i]
-        text = (f"{record['miou']:.4f} / {record['mdice']:.4f}" if record else "mIoU / mDice")
-        fig.text(center, .80, text, ha="center", va="center", fontsize=16, fontproperties=score_font)
+        perfect_gt = (title == "GT" and record and np.isclose(record["miou"], 1.)
+                      and np.isclose(record["mdice"], 1.))
+        text = ("1 / 1" if perfect_gt else
+                f"{record['miou']:.4f} / {record['mdice']:.4f}" if record else "mIoU / mDice")
+        fig.text(center, (main_bottom+main_height+score_height*.52)/fig_height,
+                 text, ha="center", va="center", fontsize=16, fontproperties=score_font)
         h, w = rgb.shape[:2]
         for row in (0, 1):
-            ax = fig.add_axes([x, .385 if row == 0 else .070, width, .36 if row == 0 else .265])
+            y, height = (main_bottom, main_height) if row == 0 else (crop_bottom, crop_height)
+            ax = fig.add_axes([x, y/fig_height, width, height/fig_height])
             if row == 0:
                 ax.imshow(rgb, extent=(0, aspect, 1, 0), interpolation="nearest", aspect="equal")
                 ax.add_patch(Rectangle((x0*aspect, y0), (x1-x0)*aspect, y1-y0,
@@ -136,10 +165,9 @@ def save_figure(panels, records, roi, aspect, output, score_font=None):
             for spine in ax.spines.values():
                 spine.set_edgecolor("#d92323" if row else "#777777")
                 spine.set_linewidth(1 if row else .65)
-    fig.text(.5, .020, "Red shading: foreground mask     Red boxes: enlarged regions     Scores: full inference grid",
-             ha="center", fontsize=12)
-    fig.savefig(output / "figure7.png", dpi=300)
-    fig.savefig(output / "figure7.pdf", dpi=300)
+    with plt.rc_context({"pdf.fonttype": 42}):
+        fig.savefig(output / "figure7.png", dpi=300)
+        fig.savefig(output / "figure7.pdf", dpi=300)
     plt.close(fig)
 
 
@@ -171,17 +199,18 @@ def generate(args):
     selected = select_split(list_images(root/"hazy"), args, anchor_path, anchor_checkpoint)
     sample = args.sample or selected[0].stem
     if sample not in {p.stem for p in selected}:
-        raise ValueError(f"{sample} is outside the selected validation split; choose a validation sample")
+        raise ValueError(f"{sample} is outside the selected {'validation' if args.split == 'val' else 'training'} split")
     overlap = training_overlap("paired-road", root, [sample], anchor_path, anchor_checkpoint)
-    if overlap:
+    known_overlap = set(overlap)
+    if overlap and not args.allow_training_overlap:
         raise ValueError(f"Sample {sample} overlaps checkpoint training references; choose another validation sample")
     paths = {name: find_by_stem(root/name, sample) for name in ("hazy", "clear", "masks")}
     if any(p is None for p in paths.values()):
         raise ValueError(f"Missing triplet for {sample}")
-    size = (args.resize[1], args.resize[0])
     with Image.open(paths["hazy"]) as source:
         hazy = source.convert("RGB")
         aspect = hazy.width/hazy.height
+        size = hazy.size if args.native_resolution else (args.resize[1], args.resize[0])
         input_rgb = np.asarray(hazy.resize(size, Image.Resampling.BILINEAR))/255.
     with Image.open(paths["clear"]) as source:
         clear = np.asarray(source.convert("RGB").resize(size, Image.Resampling.BILINEAR))/255.
@@ -199,7 +228,8 @@ def generate(args):
         else:
             model, config, checkpoint = load_checkpoint(checkpoint_path, device, args.legacy_profile)
             overlap = training_overlap("paired-road", root, [sample], checkpoint_path, checkpoint)
-            if overlap:
+            known_overlap.update(overlap)
+            if overlap and not args.allow_training_overlap:
                 raise ValueError(f"Sample {sample} overlaps training data for {checkpoint_path}")
             label = LABELS[config["model"]]
             if config["model"] == "dcp":
@@ -208,7 +238,12 @@ def generate(args):
             digest = file_digest(checkpoint_path)
         if use_shared:
             model = use_shared_segmenter(model, shared)
-        restored, logits, _ = infer_image(model, hazy, device, args.resize, return_to_original=False)
+        if args.native_resolution:
+            restored, logits, _ = model(pil_to_rgb_tensor(hazy)[None].to(device))
+            if restored.shape[-2:] != (size[1], size[0]) or logits.shape[-2:] != (size[1], size[0]):
+                raise ValueError("Native model output does not match the original image grid; use --resize")
+        else:
+            restored, logits, _ = infer_image(model, hazy, device, args.resize, return_to_original=False)
         labels = logits.argmax(1).cpu()
         cm = confusion_matrix(labels, target, 2)
         metrics = segmentation_metrics(cm)
@@ -230,9 +265,12 @@ def generate(args):
     gt_metrics = segmentation_metrics(confusion_matrix(target, target, 2))
     panels.append(("Ground truth", overlay(clear, target_array)))
     plot_records.append(gt_metrics)
-    record = dict(sample=sample, dataset="paired-road", split="val", known_training_overlap=[],
-        sample_selection="explicit ID" if args.sample else "first validation ID; not selected by score",
-        resize=args.resize, metric_resolution="inference", display_aspect=aspect, roi=args.roi,
+    diagnostic = args.split == "train" or bool(known_overlap)
+    record = dict(sample=sample, dataset="paired-road", split=args.split, known_training_overlap=sorted(known_overlap),
+        qualitative_diagnostic=diagnostic, allow_training_overlap=args.allow_training_overlap,
+        sample_selection="explicit ID" if args.sample else f"first {args.split} ID; not selected by score",
+        resize=[size[1], size[0]], native_resolution=args.native_resolution,
+        metric_resolution="inference", display_aspect=aspect, roi=args.roi,
         metric_definition="Hard argmax; mean over background and foreground; full grid, not ROI; absent classes zero; eps=1e-6",
         target_mask="target_mask.png", sources={k:dict(file=p.name, sha256=file_digest(p)) for k,p in paths.items()},
         segmentation_protocol=args.segmentation_protocol, shared_segmenter=shared_info, methods=method_records,
@@ -242,13 +280,14 @@ def generate(args):
     write_json(output/"figure7_metrics.json", record)
     write_csv(output/"figure7_metrics.csv", csv_rows)
     save_figure(panels, plot_records, args.roi, aspect, output, score_font)
-    caption = (f"Fig. 7. Road-region segmentation on validation sample {sample}. "
+    caption = (f"Fig. 7. Road-region segmentation on {'training' if args.split == 'train' else 'validation'} sample {sample}. "
         + ("Each method uses its complete joint checkpoint, including its own LiteAttentionUNet. "
            if not use_shared else "The dehazing methods use one shared, frozen LiteAttentionUNet. ") +
-        f"Full-image mIoU and mDice are computed at {args.resize[0]} x {args.resize[1]} from hard labels, "
+        f"Full-image mIoU and mDice are computed at {size[1]} x {size[0]} from hard labels, "
         "averaged over background and foreground. Red shading denotes the foreground; "
         "the bottom row enlarges the red boxes. Display panels preserve the source aspect ratio. "
-        "These are single-image results. " + ("The DCP panel uses the classical parameter-free implementation."
+        + ("This is a qualitative training-data diagnostic, not held-out evaluation. " if diagnostic else "These are single-image results. ")
+        + ("The DCP panel uses the classical parameter-free implementation."
             if args.include_dcp else "The DCP panel uses its checkpoint's recorded implementation."))
     (output/"caption.txt").write_text(caption+"\n", encoding="utf-8")
     print(json.dumps(dict(sample=sample, scores=csv_rows, figure=str(output/"figure7.png")), ensure_ascii=False))
